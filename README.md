@@ -52,7 +52,7 @@ The script automatically installs required packages:
 
 ```bash
 cd ~
-git clone https://github.com/chrisguida/garbageman-vmm.git
+git clone git@github.com:paulscode/garbageman-vmm.git
 cd garbageman-vmm
 ```
 
