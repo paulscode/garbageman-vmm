@@ -124,23 +124,40 @@ Choose **"Create Base VM"** from the menu. This will:
 Choose **"Base VM Monitor Sync"** from the menu. This will:
 
 1. **Prompt you to confirm/change resources** (in case you want different settings than creation time)
-2. Start the VM with your chosen resources
-3. Show a **live progress display**:
+2. Start the VM with your chosen resources (or connect to it if already running)
+3. Show a **live auto-refreshing progress display**:
    ```
-   VM: gm-base   IP: 192.168.122.50
-   Blocks: 450123/850000    IBD: true    Progress: 52%
-   
-   OK = Refresh   Cancel = Stop & Shutdown
+   ╔════════════════════════════════════════════════════════════════════════════════╗
+   ║                     Garbageman IBD Monitor - 52% Complete                      ║
+   ╠════════════════════════════════════════════════════════════════════════════════╣
+   ║                                                                                ║
+   ║  Host Resources:                                                               ║
+   ║    Cores: 8 total | 2 reserved | 6 available                                   ║
+   ║    RAM:   16384 MiB total | 4096 MiB reserved | 12288 MiB available            ║
+   ║                                                                                ║
+   ║  VM Status:                                                                    ║
+   ║    Name: gm-base                                                               ║
+   ║    IP:   192.168.122.50                                                        ║
+   ║                                                                                ║
+   ║  Bitcoin Sync Status:                                                          ║
+   ║    Blocks:   450123 / 850000                                                   ║
+   ║    Progress: 52% (0.5234)                                                      ║
+   ║    IBD:      true                                                              ║
+   ║    Peers:    15                                                                ║
+   ║                                                                                ║
+   ╠════════════════════════════════════════════════════════════════════════════════╣
+   ║  Auto-refreshing every 5 seconds... Press Ctrl+C to exit                       ║
+   ╚════════════════════════════════════════════════════════════════════════════════╝
    ```
-4. Poll every 5 seconds to update progress
-5. When sync completes, offer to downsize VM to runtime resources
+4. Auto-refresh every 5 seconds (no manual refresh needed)
+5. When sync completes, automatically shut down the VM and resize it to runtime resources
 
 **⏰ How long does sync take?**
 - With 8 cores + 8 GB RAM: ~24 hours (depends on multiple factors)
 - With 4 cores + 4 GB RAM: >48 hours
 - You can stop and resume anytime - progress is saved!
 
-**💡 Tip:** You can press "Cancel" anytime to gracefully shut down the VM and do something else. Your progress is saved, and you can resume later by choosing "Start & Monitor" again.
+**💡 Tip:** Press Ctrl+C anytime to exit the monitor. The VM keeps running in the background, and you can reconnect later by choosing "Monitor Base VM Sync" again (it will detect the VM is already running and let you change resources if needed).
 
 #### Step 4: Clone Your Synced Node
 
@@ -193,9 +210,10 @@ Choose **"Create Clone VMs (gm-clone-*)"** from the menu:
 
 #### Option 2: Monitor Base VM Sync
 - **When to use:** After creating the base VM, to sync the blockchain
-- **What it does:** Starts the VM and shows live IBD progress
+- **What it does:** Connects to the VM (starts it if stopped) and shows live auto-refreshing IBD progress
 - **Time:** 24-48 hours (varies greatly, due to multiple factors)
-- **Can be resumed:** Yes! Stop and restart anytime
+- **Can be resumed:** Yes! Press Ctrl+C to exit monitor anytime (VM keeps running)
+- **On completion:** Automatically shuts down VM and resizes to runtime resources
 
 #### Option 3: Manage Base VM
 - **When to use:** Simple start/stop/status controls for the base VM
