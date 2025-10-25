@@ -1,0 +1,68 @@
+# ----- OS / Editor junk -----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.code-workspace
+*.iml
+
+# ----- Backup files -----
+*.backup
+*.backup-*
+*.bak
+*.old
+
+# ----- Shell / logs / temp -----
+*.log
+*.tmp
+*.temp
+tmp/
+logs/
+
+# ----- Env / secrets (if you ever add them) -----
+.env
+.env.* 
+*.secret
+*.key
+*.pem
+
+# ----- Build outputs (host-side Garbageman build) -----
+# If you build Garbageman in the repo (default is $HOME/src/garbageman)
+src/
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+
+# ----- Script caches & artifacts -----
+# Binaries staged by the TUI for guest injection
+.cache/gm-bins/
+# Monitor’s temporary SSH key + known_hosts
+.cache/gm-monitor/
+
+# ----- ISOs / disk images / VM artifacts (never commit these) -----
+*.iso
+*.qcow2
+*.raw
+*.img
+*.vmdk
+*.vdi
+
+# ----- Archive blobs -----
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bz2
+*.xz
+*.7z
+
+# ----- Misc tools -----
+shellcheck-results/
+coverage/
+dist/
+build/
