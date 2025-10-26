@@ -51,8 +51,9 @@ The script automatically installs required packages:
 ### 1. Download the Script
 
 ```bash
+sudo apt-get install -y git
 cd ~
-git clone git@github.com:paulscode/garbageman-vmm.git
+git clone https://github.com/paulscode/garbageman-vmm.git
 cd garbageman-vmm
 ```
 
