@@ -261,13 +261,16 @@ ensure_vm_stopped(){
 #   - Adds current user to libvirt group (may require logout to take effect)
 install_deps() {
   echo "Installing required packages (requires sudo)..."
-  sudo apt-get update -y
+  sudo apt-get update
+  sudo apt-get install -y software-properties-common
+  sudo add-apt-repository -y universe
+  sudo apt-get update
   sudo apt-get install -y \
     git build-essential cmake pkg-config libevent-dev \
     libboost-system-dev libboost-filesystem-dev libboost-thread-dev libsqlite3-dev \
     libzmq3-dev \
     qemu-kvm libvirt-daemon-system libvirt-clients virtinst virt-manager \
-    libguestfs-tools virt-builder xorriso curl jq openssh-client dialog whiptail
+    libguestfs-tools xorriso curl jq openssh-client dialog whiptail
   sudo systemctl enable --now libvirtd
   
   # Add current user to libvirt group so they can manage VMs without sudo
