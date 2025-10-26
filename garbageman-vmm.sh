@@ -280,8 +280,54 @@ install_deps() {
   echo "Note: You may need to log out and back in for group membership to take effect."
   
   # Ensure default network is started (required for VM networking)
-  virsh_cmd net-autostart default || true
-  virsh_cmd net-start default || true
+  ensure_default_network
+}
+
+# ensure_default_network: Ensure libvirt's default network exists and is active
+# Purpose: Creates, defines, starts, and auto-starts the default network if missing
+# This is needed for VMs to have network connectivity
+# Side effects: May create and start the default libvirt network
+ensure_default_network(){
+  local network_xml="/tmp/libvirt-default-network.xml"
+  
+  # Check if default network is already defined
+  if ! virsh_cmd net-info default >/dev/null 2>&1; then
+    echo "Creating libvirt default network..."
+    
+    # Create default network XML definition
+    cat > "$network_xml" <<'EOF'
+<network>
+  <name>default</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+    
+    # Define the network
+    virsh_cmd net-define "$network_xml" || {
+      echo "Warning: Failed to define default network"
+      rm -f "$network_xml"
+      return 1
+    }
+    rm -f "$network_xml"
+  fi
+  
+  # Ensure network is set to autostart
+  virsh_cmd net-autostart default 2>/dev/null || true
+  
+  # Start the network if not already active
+  # Check if network is active using net-list instead of net-info for more reliable parsing
+  if ! virsh_cmd net-list --all 2>/dev/null | grep -q "default.*active"; then
+    echo "Starting libvirt default network..."
+    virsh_cmd net-start default 2>/dev/null || true
+  fi
+  
+  return 0
 }
 
 # ensure_tools: Check for required commands and install if missing
@@ -291,6 +337,9 @@ ensure_tools(){
     cmd "$t" || install_deps
   done
   cmd dialog || sudo apt-get install -y dialog whiptail
+  
+  # Ensure the default network is available after tools are installed
+  ensure_default_network
 }
 
 
@@ -449,6 +498,85 @@ Post-sync capacity estimate:
       return 1
       ;;
   esac
+
+  # 1) Edit numeric defaults via individual inputbox prompts
+  local _rc _rram _vcpus _vram
+  
+  # Get reserve cores
+  _rc=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nReserve cores for host:" \
+    12 60 "$RESERVE_CORES" 3>&1 1>&2 2>&3) || return 1
+  
+  # Get reserve RAM
+  _rram=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nReserve RAM for host (MiB):" \
+    12 60 "$RESERVE_RAM_MB" 3>&1 1>&2 2>&3) || return 1
+  
+  # Get runtime VM vCPUs (used after IBD and for all clones)
+  _vcpus=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nRuntime VM vCPUs (per VM after sync):" \
+    12 60 "$VM_VCPUS" 3>&1 1>&2 2>&3) || return 1
+  
+  # Get runtime VM RAM (used after IBD and for all clones)
+  _vram=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nRuntime VM RAM (MiB per VM after sync):" \
+    12 60 "$VM_RAM_MB" 3>&1 1>&2 2>&3) || return 1
+
+  # Validate integers
+  [[ "$_rc" =~ ^[0-9]+$ ]]    || die "Reserve cores must be a non-negative integer."
+  [[ "$_rram" =~ ^[0-9]+$ ]]  || die "Reserve RAM must be a non-negative integer."
+  [[ "$_vcpus" =~ ^[0-9]+$ ]] || die "Runtime VM vCPUs must be a positive integer."
+  [[ "$_vram" =~ ^[0-9]+$ ]]  || die "Runtime VM RAM must be a positive integer."
+  (( _vcpus >= 1 )) || die "Runtime VM vCPUs must be at least 1."
+  (( _vram >= 512 )) || die "Runtime VM RAM should be at least 512 MiB."
+
+  # Apply edits
+  RESERVE_CORES="$_rc"
+  RESERVE_RAM_MB="$_rram"
+  VM_VCPUS="$_vcpus"
+  VM_RAM_MB="$_vram"
+
+  # 2) Toggle clearnet option via radiolist
+  # This determines if the base VM can use clearnet peers (clones are always Tor-only)
+  local status_yes status_no
+  status_yes="ON"; status_no="OFF"
+  [[ "${CLEARNET_OK,,}" == "no" ]] && { status_yes="OFF"; status_no="ON"; }
+  local choice
+  choice=$(whiptail --title "Allow clearnet peers on one VM?" --radiolist \
+    "If enabled, the BASE VM (only) will use Tor + clearnet.\nClones are forced to Tor-only regardless." \
+    15 78 2 \
+    "yes" "" "$status_yes" \
+    "no"  "" "$status_no" \
+    3>&1 1>&2 2>&3) || return 1
+  CLEARNET_OK="$choice"
+
+  # Recompute suggestions & show confirmation summary
+  detect_host_resources
+  local confirm_text="Please confirm these settings:\n
+Reserves (host keeps):  ${RESERVE_CORES} cores, ${RESERVE_RAM_MB} MiB RAM
+Runtime per VM:         ${VM_VCPUS} vCPU(s), ${VM_RAM_MB} MiB RAM
+Clearnet on base VM:    ${CLEARNET_OK}
+
+Host totals:            ${HOST_CORES} cores, ${HOST_RAM_MB} MiB
+Available after reserve:${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB
+
+Initial sync suggestion:
+  vCPUs=${HOST_SUGGEST_SYNC_VCPUS}, RAM=${HOST_SUGGEST_SYNC_RAM_MB} MiB
+
+Post-sync capacity estimate:
+  Suggested clones alongside the base: ${HOST_SUGGEST_CLONES}"
+
+  whiptail --title "Confirm Defaults" --yesno "$confirm_text" 22 78 || return 1
+  return 0
+}
+
+# configure_defaults_direct: Jump directly to custom configuration screen
+# Purpose: Used by Action 1 to skip the "Reset/Custom" menu and go straight to config
+# This provides a streamlined flow for first-time setup
+# Returns: 0 on success (changes saved), 1 on cancel
+# Side effects: Updates global variables (RESERVE_*, VM_*, CLEARNET_OK)
+configure_defaults_direct(){
+  detect_host_resources
 
   # 1) Edit numeric defaults via individual inputbox prompts
   local _rc _rram _vcpus _vram
@@ -1644,7 +1772,7 @@ create_base_vm(){
   ensure_tools
 
   # Let user configure/edit defaults & clearnet toggle; show confirmation.
-  if ! configure_defaults; then
+  if ! configure_defaults_direct; then
     pause "Cancelled."
     return
   fi
