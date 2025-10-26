@@ -51,10 +51,7 @@ The script automatically installs required packages:
 ### 1. Download the Script
 
 ```bash
-sudo apt update
-sudo apt install -y git software-properties-common
-sudo add-apt-repository universe
-sudo apt update
+sudo apt-get install -y git
 cd ~
 git clone https://github.com/paulscode/garbageman-vmm.git
 cd garbageman-vmm
