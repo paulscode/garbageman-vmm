@@ -24,7 +24,7 @@ This script makes it **dead simple** to:
 
 **No manual configuration needed** - the script handles everything from building the software to setting up Tor networking.
 
-<img width="1024" height="1255" alt="image" src="https://github.com/user-attachments/assets/87e404a2-180a-4be6-bd74-6a6ad497dd0f" />
+<img width="1024" height="1255" alt="image" src="https://github.com/user-attachments/assets/da188a73-750d-44df-8555-2a5d08f5f413" />
 
 
 ---
