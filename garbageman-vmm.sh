@@ -317,8 +317,8 @@ EOF
     rm -f "$network_xml"
   fi
   
-  # Ensure network is set to autostart
-  virsh_cmd net-autostart default 2>/dev/null || true
+  # Ensure network is set to autostart (suppress output - may already be set)
+  virsh_cmd net-autostart default >/dev/null 2>&1 || true
   
   # Start the network if not already active
   # Check if network is active using net-list instead of net-info for more reliable parsing
@@ -339,7 +339,7 @@ ensure_tools(){
   cmd dialog || sudo apt-get install -y dialog whiptail
   
   # Ensure the default network is available after tools are installed
-  ensure_default_network
+  ensure_default_network || true
 }
 
 
