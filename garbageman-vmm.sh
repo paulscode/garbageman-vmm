@@ -280,7 +280,7 @@ install_deps() {
   echo "Note: You may need to log out and back in for group membership to take effect."
   
   # Ensure default network is started (required for VM networking)
-  ensure_default_network
+  ensure_default_network || true
 }
 
 # ensure_default_network: Ensure libvirt's default network exists and is active
@@ -309,11 +309,11 @@ ensure_default_network(){
 EOF
     
     # Define the network
-    virsh_cmd net-define "$network_xml" || {
-      echo "Warning: Failed to define default network"
+    if ! virsh_cmd net-define "$network_xml" 2>/dev/null; then
+      echo "Warning: Failed to define default network" >&2
       rm -f "$network_xml"
-      return 1
-    }
+      return 0  # Don't fail the whole script, just continue
+    fi
     rm -f "$network_xml"
   fi
   
@@ -321,8 +321,10 @@ EOF
   virsh_cmd net-autostart default >/dev/null 2>&1 || true
   
   # Start the network if not already active
-  # Check if network is active using net-list instead of net-info for more reliable parsing
-  if ! virsh_cmd net-list --all 2>/dev/null | grep -q "default.*active"; then
+  # Store net-list output to avoid pipeline issues with set -o pipefail
+  local net_list_output
+  net_list_output=$(virsh_cmd net-list --all 2>/dev/null || true)
+  if ! echo "$net_list_output" | grep -q "default.*active"; then
     echo "Starting libvirt default network..."
     virsh_cmd net-start default 2>/dev/null || true
   fi
