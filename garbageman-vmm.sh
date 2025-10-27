@@ -200,7 +200,9 @@ sudo_keepalive_stop(){
 # Args: $1 = VM name
 # Returns: State string ("running", "shut off", "paused", etc.)
 vm_state(){ 
-  virsh_cmd domstate "$1" 2>/dev/null | tr -d '\r'
+  local state
+  state=$(virsh_cmd domstate "$1" 2>/dev/null || echo "unknown")
+  echo "$state" | tr -d '\r'
 }
 
 # pause: Display an informational message and wait for user acknowledgment
@@ -2036,17 +2038,12 @@ resize_vm_to_defaults(){
 #   9. When IBD completes, offer to downsize to runtime resources
 # Returns: 0 on normal exit, 1 on error
 monitor_sync(){
-  echo "DEBUG: Starting monitor_sync..." >&2
   ensure_tools
-  echo "DEBUG: ensure_tools completed" >&2
   sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1 || die "VM '$VM_NAME' not found."
-  echo "DEBUG: VM found" >&2
 
   # Check if VM is already running
   local vm_state_now
-  echo "DEBUG: Getting VM state..." >&2
   vm_state_now="$(vm_state "$VM_NAME")"
-  echo "DEBUG: VM state is: $vm_state_now" >&2
   
   local ip
   if [[ "$vm_state_now" == "running" ]]; then
