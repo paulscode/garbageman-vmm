@@ -109,27 +109,13 @@ die(){
   exit 1
 }
 
-# need_sudo_for_virsh: Check if sudo is required for virsh commands
-# Returns: 0 if sudo needed, 1 if not
-# Note: Some systems configure libvirt for unprivileged access via group membership
-need_sudo_for_virsh(){
-  # Try virsh without sudo first
-  if virsh list >/dev/null 2>&1; then
-    return 1  # No sudo needed
-  else
-    return 0  # Sudo needed
-  fi
-}
-
-# virsh_cmd: Wrapper for virsh commands that uses sudo if needed
+# virsh_cmd: Wrapper for virsh commands that always uses sudo and system instance
 # Args: $@ = virsh command and arguments
 # Example: virsh_cmd list --all
+# Always connects to qemu:///system (not user session) and uses sudo
+# This ensures consistent behavior regardless of group membership
 virsh_cmd(){ 
-  if need_sudo_for_virsh; then
-    sudo virsh "$@"
-  else
-    virsh "$@"
-  fi
+  sudo virsh -c qemu:///system "$@"
 }
 
 # virt_cmd: Wrapper for virt-* tools (virt-customize, virt-install, etc.) that uses sudo if needed
@@ -202,7 +188,8 @@ sudo_keepalive_stop(){
 vm_state(){ 
   local state
   state=$(virsh_cmd domstate "$1" 2>/dev/null || echo "unknown")
-  echo "$state" | tr -d '\r'
+  # Remove carriage returns and newlines, output just the state
+  echo "$state" | tr -d '\r\n'
 }
 
 # pause: Display an informational message and wait for user acknowledgment
@@ -2039,7 +2026,7 @@ resize_vm_to_defaults(){
 # Returns: 0 on normal exit, 1 on error
 monitor_sync(){
   ensure_tools
-  sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1 || die "VM '$VM_NAME' not found."
+  virsh_cmd dominfo "$VM_NAME" >/dev/null 2>&1 || die "VM '$VM_NAME' not found."
 
   # Check if VM is already running
   local vm_state_now
@@ -2950,7 +2937,7 @@ main_menu(){
   while true; do
     detect_host_resources
     local base_exists="No"
-    virsh dominfo "$VM_NAME" >/dev/null 2>&1 && base_exists="Yes"
+    virsh_cmd dominfo "$VM_NAME" >/dev/null 2>&1 && base_exists="Yes"
 
     local header="Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB
 Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB
