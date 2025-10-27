@@ -2149,7 +2149,9 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM
       echo ""
       
       # Try SSH to ensure monitoring key works
-      if ! gssh "$ip" "true" 2>/dev/null; then
+      # Use a short timeout and suppress all output
+      echo "Verifying SSH access..."
+      if ! timeout 5 gssh "$ip" "true" >/dev/null 2>&1; then
         echo "⚠ SSH key not configured for monitoring. Setting up now..."
         echo "Note: This requires stopping the VM briefly."
         echo ""
