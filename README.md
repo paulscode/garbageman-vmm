@@ -54,7 +54,7 @@ The script automatically installs required packages:
 
 ## � Running in VirtualBox
 
-I recommend running this script **inside a VirtualBox VM** with a Linux Mint 22.2 guest so that it is sandboxed from the rest of your computer.  This section explains how to optimize VirtualBox for running VMs iside of a VM ("VM Inception", so to speak)
+I recommend running this script **inside a VirtualBox VM** with a Linux Mint 22.2 guest, so that it is sandboxed from the rest of your computer.  This section explains how to optimize VirtualBox for running VMs inside of a VM ("VM Inception", so to speak)
 
 ### Why VirtualBox Performance Matters
 
