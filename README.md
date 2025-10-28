@@ -52,7 +52,121 @@ The script automatically installs required packages:
 
 ---
 
-## 🚀 Quick Start
+## � Running in VirtualBox
+
+I recommend running this script **inside a VirtualBox VM** with a Linux Mint 22.2 guest so that it is sandboxed from the rest of your computer.  This section explains how to optimize VirtualBox for running VMs iside of a VM ("VM Inception", so to speak)
+
+### Why VirtualBox Performance Matters
+
+This script performs CPU and I/O intensive operations:
+- **Compilation:** Building Bitcoin software (30+ minutes of heavy CPU use)
+- **Nested Virtualization:** Creates Alpine VMs inside your Linux Mint VM using libguestfs/KVM
+- **Blockchain Sync:** Downloads and validates 25+ GB of blockchain data with constant disk I/O
+
+Without proper VirtualBox configuration, these operations can be 3-5x slower than native performance.
+
+### Guest OS Recommendation
+
+**Use Linux Mint 22.2 Cinnamon Edition** for the guest OS:
+- Based on Ubuntu 24.04 LTS (excellent hardware support)
+- Cinnamon desktop is lightweight and responsive
+- All required packages are available in the default repositories
+- Well-tested with this script
+
+**Download:** [linuxmint.com/download.php](https://linuxmint.com/download.php)
+
+### Essential VirtualBox Settings
+
+These settings are **critical** for acceptable performance. Most are available in the VirtualBox GUI.
+
+#### 1. System Settings (Settings → System)
+
+**Motherboard Tab:**
+- ✅ **Enable I/O APIC:** Required for multi-core support
+- Set **Base Memory** to at least 8192 MB (8 GB minimum, 16+ GB recommended)
+
+**Processor Tab:**
+- ✅ **Enable PAE/NX:** Required for 64-bit Linux
+- ✅ **Enable Nested VT-x/AMD-V:** **CRITICAL** - Required for nested virtualization (VMs inside of a VM)
+- Set **Processor(s)** to at least 4 cores (8+ recommended)
+- Set **Execution Cap** to 100% (ensure VM isn't throttled)
+
+**Acceleration Tab:**
+- Set **Paravirtualization Interface** to **KVM** (best performance for Linux guests)
+
+#### 2. Storage Settings (Settings → Storage)
+
+**Use VirtIO SCSI Controller for Best I/O Performance:**
+
+1. Click the **"Add Controller"** icon → Select **"VirtIO SCSI"**
+2. Attach your virtual disk to the VirtIO SCSI controller
+3. For the disk attachment, under **Attributes:**
+   - ✅ **Use Host I/O Cache:** Significantly improves disk performance
+
+**Disk Format Recommendations:**
+- Use **VDI** format (native VirtualBox format)
+- Allocate as **Fixed size** instead of dynamically allocated (better performance, especially for write-heavy workloads)
+- Allocate at least **80 GB** (50+ GB for the script's VMs, plus OS overhead)
+
+#### 3. Network Settings (Settings → Network)
+
+**Adapter 1:**
+- Attached to: **NAT** or **Bridged Adapter**
+- Expand **Advanced** section
+- Set **Adapter Type** to **Paravirtualized Network (virtio-net)** for best performance
+
+#### 4. Display Settings (Settings → Display)
+
+**Screen Tab:**
+- Set **Video Memory** to minimum **16 MB** (this is a server workload, graphics don't matter)
+- ❌ **Disable 3D Acceleration** (not needed, can cause issues)
+
+#### 5. Audio Settings (Settings → Audio)
+
+- ❌ **Disable "Enable Audio"** (not needed for server workloads, saves resources)
+
+### Quick Configuration Checklist
+
+Before running the script, verify these VirtualBox settings:
+
+- [ ] **Nested VT-x/AMD-V enabled** (System → Processor)
+- [ ] **Paravirtualization Interface = KVM** (System → Acceleration)
+- [ ] **VirtIO SCSI controller** with Host I/O Cache enabled (Storage)
+- [ ] **virtio-net network adapter** (Network → Advanced)
+- [ ] **I/O APIC enabled** (System → Motherboard)
+- [ ] **PAE/NX enabled** (System → Processor)
+- [ ] **Execution Cap = 100%** (System → Processor)
+- [ ] At least **8 GB RAM** and **4 CPU cores** allocated
+- [ ] At least **80 GB disk space** (fixed size VDI recommended)
+- [ ] **3D acceleration disabled** (Display)
+- [ ] **Audio disabled** (Audio)
+
+### Verifying Nested Virtualization Works
+
+After starting your Linux Mint VM, verify that nested virtualization is working:
+
+```bash
+# Check if KVM is available
+ls -la /dev/kvm
+# Should show: crw-rw---- 1 root kvm ... /dev/kvm
+
+# Check CPU virtualization extensions
+egrep -c '(vmx|svm)' /proc/cpuinfo
+# Should show a number > 0 (number of cores with virt extensions)
+
+# Verify KVM kernel module is loaded
+lsmod | grep kvm
+# Should show: kvm_intel or kvm_amd (depending on your CPU)
+```
+
+If any of these checks fail:
+1. Ensure **Nested VT-x/AMD-V** is enabled in VirtualBox settings
+2. Power off the VM completely and restart it (settings only apply after full shutdown)
+3. Check your host BIOS has virtualization enabled (VT-x/AMD-V)
+
+---
+
+## �🚀 Quick Start
 
 ### 1. Download the Script
 
