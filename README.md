@@ -72,7 +72,7 @@ chmod +x garbageman-vmm.sh
 ### 3. Run It!
 
 ```bash
-./garbageman-vmm.sh
+~/garbageman-vmm/garbageman-vmm.sh
 ```
 
 That's it! The script will:
