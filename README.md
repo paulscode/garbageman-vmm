@@ -77,7 +77,7 @@ Without proper VirtualBox configuration, these operations can be 3-5x slower tha
 
 ### Essential VirtualBox Settings
 
-These settings are **critical** for acceptable performance. Most are available in the VirtualBox GUI.
+These settings are **critical** for acceptable performance, and can be edited in the Settings once the VM has been created (shut down the VM first if it is running).
 
 #### 1. System Settings (Settings → System)
 
