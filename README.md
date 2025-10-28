@@ -89,7 +89,7 @@ That's it! The script will:
 Here's the normal sequence most users follow:
 
 1. **First time:** Configure Defaults (Option 7) - *optional, can use defaults*
-2. **Create:** Create Base VM (Option 1) - *10-30 minutes*
+2. **Create:** Create Base VM (Option 1) - *2+ hours*
 3. **Sync:** Monitor Base VM Sync (Option 2) - *24-48 hours, can pause/resume*
 4. **Clone:** Create Clone VMs (Option 4) - *1-2 minutes per clone*
 5. **Start clones:** Manage Clone VMs (Option 5) → Start each clone
@@ -116,9 +116,7 @@ When you first run the script, you can optionally choose **"Configure Defaults"*
 Choose **"Create Base VM"** from the menu. This will:
 
 1. Download Alpine Linux (tiny, fast VM OS)
-2. **Build Garbageman inside the VM** (takes 10-30 minutes depending on your CPU)
-   - ☕ Grab a coffee! This is the most boring part
-   - The script will show progress and estimated completion time
+2. **Build Garbageman inside the VM** (typically takes more than 2 hours, depending on your CPU)
 3. Configure Tor and Bitcoin services
 4. Stop the VM and leave it ready to sync
 
@@ -135,22 +133,22 @@ Choose **"Base VM Monitor Sync"** from the menu. This will:
 3. Show a **live auto-refreshing progress display**:
    ```
    ╔════════════════════════════════════════════════════════════════════════════════╗
-   ║                     Garbageman IBD Monitor - 52% Complete                      ║
+   ║                     Garbageman IBD Monitor - 26% Complete                      ║
    ╠════════════════════════════════════════════════════════════════════════════════╣
    ║                                                                                ║
    ║  Host Resources:                                                               ║
    ║    Cores: 8 total | 2 reserved | 6 available                                   ║
-   ║    RAM:   16384 MiB total | 4096 MiB reserved | 12288 MiB available            ║
+   ║    RAM:   24032 MiB total | 4096 MiB reserved | 19936 MiB available            ║
    ║                                                                                ║
    ║  VM Status:                                                                    ║
    ║    Name: gm-base                                                               ║
-   ║    IP:   192.168.122.50                                                        ║
+   ║    IP:   192.168.122.44                                                        ║
    ║                                                                                ║
    ║  Bitcoin Sync Status:                                                          ║
-   ║    Blocks:   450123 / 850000                                                   ║
-   ║    Progress: 52% (0.5234)                                                      ║
+   ║    Blocks:   529668 / 921108                                                   ║
+   ║    Progress: 26% (0.255699756115667)                                           ║
    ║    IBD:      true                                                              ║
-   ║    Peers:    15                                                                ║
+   ║    Peers:    14                                                                ║
    ║                                                                                ║
    ╠════════════════════════════════════════════════════════════════════════════════╣
    ║  Auto-refreshing every 5 seconds... Press Ctrl+C to exit                       ║
@@ -160,8 +158,8 @@ Choose **"Base VM Monitor Sync"** from the menu. This will:
 5. When sync completes, automatically shut down the VM and resize it to runtime resources
 
 **⏰ How long does sync take?**
-- With 8 cores + 8 GB RAM: ~24 hours (depends on multiple factors)
-- With 4 cores + 4 GB RAM: >48 hours
+- With 8+ cores, >8 GB RAM: ~24 hours (depends on multiple factors)
+- With 4+ cores <8 GB RAM: >48 hours
 - You can stop and resume anytime - progress is saved!
 
 **💡 Tip:** Press Ctrl+C anytime to exit the monitor. The VM keeps running in the background, and you can reconnect later by choosing "Monitor Base VM Sync" again (it will detect the VM is already running and let you change resources if needed).
