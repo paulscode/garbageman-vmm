@@ -99,14 +99,10 @@ These settings are **critical** for acceptable performance. Most are available i
 **Use VirtIO SCSI Controller for Best I/O Performance:**
 
 1. Click the **"Add Controller"** icon → Select **"VirtIO SCSI"**
-2. Attach your virtual disk to the VirtIO SCSI controller
-3. For the disk attachment, under **Attributes:**
+2. Remove your virtual disk from under "Controller: SATA"
+3. Attach your virtual disk to "Controller: VirtIO"
+4. Under **Attributes:**
    - ✅ **Use Host I/O Cache:** Significantly improves disk performance
-
-**Disk Format Recommendations:**
-- Use **VDI** format (native VirtualBox format)
-- Allocate as **Fixed size** instead of dynamically allocated (better performance, especially for write-heavy workloads)
-- Allocate at least **80 GB** (50+ GB for the script's VMs, plus OS overhead)
 
 #### 3. Network Settings (Settings → Network)
 
