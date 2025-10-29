@@ -2157,7 +2157,7 @@ import_from_github(){
   
   # Create temporary download directory
   local temp_dir=$(mktemp -d -t gm-github-import-XXXXXX)
-  trap "rm -rf '$temp_dir'" RETURN
+  trap "rm -rf '$temp_dir'" RETURN EXIT INT TERM
   
   echo ""
   echo "Downloading to: $temp_dir"
@@ -2195,23 +2195,71 @@ import_from_github(){
     fi
   fi
   
+  # Verify checksums of downloaded parts if available
+  if [[ -f "$temp_dir/$checksum_name" ]]; then
+    echo ""
+    echo "Verifying downloaded parts..."
+    cd "$temp_dir"
+    
+    # Extract only the part checksums (ignore comments and reassembled file checksum)
+    local verify_failed=false
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue  # Skip comments
+      [[ -z "$line" ]] && continue     # Skip empty lines
+      [[ ! "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip non-part lines
+      
+      if ! echo "$line" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
+        verify_failed=true
+      fi
+    done < "$checksum_name"
+    
+    if [[ "$verify_failed" == "true" ]]; then
+      cd - >/dev/null
+      pause "❌ One or more parts failed checksum verification!"
+      return
+    fi
+    
+    echo "    ✓ All parts verified"
+    cd - >/dev/null
+  fi
+  
   # Reassemble the archive
   echo ""
   echo "Reassembling archive..."
   cat "$temp_dir"/gm-base-export.tar.gz.part* > "$temp_dir/gm-base-export.tar.gz"
   echo "    ✓ Archive reassembled"
   
-  # Verify checksum if available
+  # Verify reassembled archive checksum if available
   if [[ -f "$temp_dir/$checksum_name" ]]; then
     echo ""
-    echo "Verifying checksum..."
+    echo "Verifying reassembled archive..."
     cd "$temp_dir"
-    if sha256sum -c <(grep "gm-base-export.tar.gz$" "$checksum_name" | sed 's/part.*gm-base-export.tar.gz/gm-base-export.tar.gz/') 2>&1 | grep -q "OK"; then
-      echo "    ✓ Checksum verified"
+    
+    # Look for the reassembled file checksum (non-comment, non-part line)
+    local reassembled_checksum=""
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue  # Skip comments
+      [[ -z "$line" ]] && continue     # Skip empty lines
+      [[ "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip part lines
+      
+      # This should be the reassembled file checksum
+      reassembled_checksum="$line"
+      break
+    done < "$checksum_name"
+    
+    if [[ -n "$reassembled_checksum" ]]; then
+      if echo "$reassembled_checksum" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✓ Reassembled archive verified"
+      else
+        cd - >/dev/null
+        pause "❌ Reassembled archive checksum verification failed!"
+        return
+      fi
     else
-      pause "❌ Checksum verification failed!"
-      return
+      echo "    ⚠ No reassembled archive checksum found (skipping)"
     fi
+    
     cd - >/dev/null
   fi
   

@@ -123,7 +123,13 @@ echo "    ✓ Created $part_count parts"
 # Generate checksums
 echo ""
 echo "[2/3] Generating checksums..."
-sha256sum gm-base-export.tar.gz.part* > gm-base-export.tar.gz.sha256
+# First, checksum for the original (unsplit) archive
+echo "# Original archive checksum (for verification after reassembly)" > gm-base-export.tar.gz.sha256
+(cd "$(dirname "$selected_archive")" && sha256sum "$(basename "$selected_archive")") | \
+  sed 's/gm-base-export-[0-9]*-[0-9]*.tar.gz/gm-base-export.tar.gz/' >> gm-base-export.tar.gz.sha256
+echo "" >> gm-base-export.tar.gz.sha256
+echo "# Individual part checksums" >> gm-base-export.tar.gz.sha256
+sha256sum gm-base-export.tar.gz.part* >> gm-base-export.tar.gz.sha256
 echo "    ✓ Checksums saved to gm-base-export.tar.gz.sha256"
 
 # Create manifest file
