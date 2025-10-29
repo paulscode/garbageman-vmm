@@ -201,7 +201,7 @@ Here's the normal sequence most users follow:
 
 1. **First time:** Configure Defaults (Option 7) - *optional, can use defaults*
 2. **Create:** Create Base VM (Option 1) - *2+ hours*
-3. **Sync:** Monitor Base VM Sync (Option 2) - *24-48 hours, can pause/resume*
+3. **Sync:** Monitor Base VM Sync (Option 2) - *24-28 hours, can pause/resume*
 4. **Clone:** Create Clone VMs (Option 4) - *1-2 minutes per clone*
 5. **Start clones:** Manage Clone VMs (Option 5) → Start each clone
 6. **Daily use:** Use Options 3 and 5 to start/stop VMs as needed
@@ -322,12 +322,12 @@ Choose **"Create Clone VMs (gm-clone-*)"** from the menu:
 #### Option 1: Create Base VM
 - **When to use:** First time setup, or to rebuild from scratch
 - **What it does:** Builds everything and creates your base node
-- **Time:** 10-30 minutes (mostly compilation time)
+- **Time:** 2+ hours (mostly compilation time)
 
 #### Option 2: Monitor Base VM Sync
 - **When to use:** After creating the base VM, to sync the blockchain
 - **What it does:** Connects to the VM (starts it if stopped) and shows live auto-refreshing IBD progress
-- **Time:** 24-48 hours (varies greatly, due to multiple factors)
+- **Time:** 24-28 hours (varies greatly, due to multiple factors)
 - **Can be resumed:** Yes! Press Ctrl+C to exit monitor anytime (VM keeps running)
 - **On completion:** Automatically shuts down VM and resizes to runtime resources
 
@@ -408,12 +408,12 @@ The script uses a dedicated temporary SSH key for monitoring:
 The script uses a **three-phase resource model**:
 
 #### Phase 1: Build (Temporary)
-- **Duration:** 10-30 minutes (one-time)
+- **Duration:** 2+ hours (one-time)
 - **Resources:** Uses your "sync" allocation
 - **Why:** More CPU = faster compilation
 
 #### Phase 2: Initial Sync (Temporary)
-- **Duration:** 24-48 hours (one-time per base VM)
+- **Duration:** 24-28 hours (one-time per base VM)
 - **Resources:** You configure this (default: all available after reserves)
 - **Why:** More resources = faster blockchain download
 
@@ -468,13 +468,20 @@ Yes! Use the built-in export feature:
    - Includes SHA256 checksum for integrity verification
 
 2. **Transfer to destination machine:**
-   - Copy both `.tar.gz` and `.tar.gz.sha256` files
+   - Copy both `.tar.gz` and `.tar.gz.sha256` files to `~/Downloads/`
    - Verify integrity: `sha256sum -c gm-base-export-*.tar.gz.sha256`
 
 3. **Import on destination machine:**
-   - Extract: `tar -xzf gm-base-export-*.tar.gz`
-   - Move disk: `sudo mv gm-base-export-*/gm-base.qcow2 /var/lib/libvirt/images/`
-   - Import with virt-install or use the import feature (coming soon)
+   - Choose **Option 1: Create Base VM** → **"Import from file"**
+   - Script will:
+     - Scan `~/Downloads/` for export archives
+     - Verify SHA256 checksum automatically
+     - Extract and import the disk image
+     - Handle existing VM/disk cleanup if needed
+     - Configure resources and inject monitoring SSH key
+     - Create the VM (left in stopped state)
+   - If blockchain is >2 hours old, sync monitoring will automatically detect
+     and wait for peers to connect and catch up to current height
 
 The export is fully sanitized and will generate fresh Tor keys on first boot.
 

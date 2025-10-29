@@ -674,7 +674,7 @@ build_garbageman_host(){
 # Purpose: Compile Garbageman using Alpine's native toolchain (musl libc)
 # Why: Host uses glibc, Alpine uses musl - binaries are NOT compatible
 # How: Uses virt-customize to run commands inside the disk image
-# Duration: 10-30 minutes depending on CPU
+# Duration: 2+ hours depending on CPU
 # Side effects:
 #   - Installs build dependencies in the VM
 #   - Clones Garbageman repo to /tmp/garbageman
@@ -687,7 +687,7 @@ build_garbageman_in_vm(){
   
   echo "=========================================="
   echo "Building Garbageman inside Alpine VM..."
-  echo "This will take 10-30 minutes depending on your CPU."
+  echo "This will take 2+ hours depending on your CPU."
   echo ""
   echo "Build VM resources: ${SYNC_VCPUS} vCPUs, ${SYNC_RAM_MB} MiB RAM"
   echo "=========================================="
@@ -727,7 +727,7 @@ build_garbageman_in_vm(){
   echo "✓ Repository cloned"
   echo ""
   
-  # Step 3: Build (this is the slow part - 10-30 minutes)
+  # Step 3: Build (this is the slow part - 2+ hours)
   # Split into two commands (configure and compile) for better visibility
   echo "Step 3a/4: Configuring build with CMake..."
   sudo virt-customize -a "$disk" \
@@ -741,7 +741,7 @@ build_garbageman_in_vm(){
   echo "✓ CMake configuration complete"
   
   echo ""
-  echo "Step 3b/4: Compiling Garbageman (this takes 10-30 minutes)..."
+  echo "Step 3b/4: Compiling Garbageman (this takes 2+ hours)..."
   echo ""
   echo "⚠️  BUILD IN PROGRESS - DO NOT INTERRUPT ⚠️"
   echo ""
@@ -750,7 +750,7 @@ build_garbageman_in_vm(){
   echo "The compilation IS happening - please be patient!"
   echo ""
   echo "Started at: $(date '+%H:%M:%S')"
-  echo "Expected completion: $(date -d '+20 minutes' '+%H:%M:%S') (approximate)"
+  echo "Expected completion: $(date -d '+2 hours' '+%H:%M:%S') (approximate)"
   echo ""
   
   # Debug: Check sudo keepalive status
@@ -771,7 +771,7 @@ build_garbageman_in_vm(){
   echo ""
   
   # Run the build WITHOUT --verbose to avoid overwhelming output
-  # The build takes 10-30 minutes and runs silently
+  # The build takes 2+ hours and runs silently
   sudo virt-customize -a "$disk" \
     --no-selinux-relabel \
     --run-command "cd /tmp/garbageman && cmake --build build -j\$(nproc)" \
@@ -1736,7 +1736,340 @@ Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
   return 0
 }
 
-# create_base_vm: Build and configure the base Bitcoin Garbageman VM
+################################################################################
+# Import Base VM
+################################################################################
+
+# import_base_vm: Import base VM from exported archive
+# Purpose: Alternative to building from scratch - imports sanitized export
+# Flow:
+#   1. Scan ~/Downloads for gm-base-export-* archives
+#   2. Let user select one
+#   3. Verify SHA256 checksum
+#   4. Extract archive and read metadata
+#   5. Check for existing VM/disk and handle cleanup if needed
+#   6. Copy disk image to /var/lib/libvirt/images/
+#   7. Configure resource allocation
+#   8. Inject monitoring SSH key directly into disk (before VM creation)
+#   9. Create libvirt domain with virt-install --import
+#  10. Stop the auto-started VM (ready for manual startup)
+# Prerequisites: Same as create_base_vm (ensures tools installed)
+# Side effects: Creates VM disk at /var/lib/libvirt/images/${VM_NAME}.qcow2
+# Note: If importing stale blockchain (>2h old), sync monitoring will detect
+#       and wait for peers to connect and catch up to current block height
+import_base_vm(){
+  # Start sudo keepalive for potential long operations
+  sudo_keepalive_start force
+  
+  ensure_tools
+
+  # Scan for export archives in ~/Downloads
+  echo "Scanning ~/Downloads for export archives..."
+  local archives=()
+  local archive_list=""
+  
+  while IFS= read -r -d '' archive; do
+    archives+=("$archive")
+    local basename=$(basename "$archive")
+    local size=$(du -h "$archive" | cut -f1)
+    archive_list="${archive_list}${basename} (${size})\n"
+  done < <(find "$HOME/Downloads" -maxdepth 1 -name "gm-base-export-*.tar.gz" -print0 2>/dev/null | sort -z)
+  
+  if [[ ${#archives[@]} -eq 0 ]]; then
+    pause "No export archives found in ~/Downloads.\n\nLooking for files matching: gm-base-export-*.tar.gz"
+    return
+  fi
+  
+  echo "Found ${#archives[@]} export archive(s)"
+  
+  # Build menu options for whiptail
+  local menu_items=()
+  for i in "${!archives[@]}"; do
+    local archive="${archives[$i]}"
+    local basename=$(basename "$archive")
+    local size=$(du -h "$archive" | cut -f1)
+    local timestamp=$(echo "$basename" | sed 's/gm-base-export-\(.*\)\.tar\.gz/\1/')
+    menu_items+=("$i" "${timestamp} (${size})")
+  done
+  
+  # Let user select archive
+  local selection
+  selection=$(whiptail --title "Select Export Archive" \
+    --menu "Choose an export archive to import:\n\nFound in: ~/Downloads" \
+    20 78 10 \
+    "${menu_items[@]}" \
+    3>&1 1>&2 2>&3) || return
+  
+  local selected_archive="${archives[$selection]}"
+  local selected_basename=$(basename "$selected_archive")
+  
+  echo ""
+  echo "Selected: $selected_basename"
+  
+  # Check for SHA256 checksum file
+  local checksum_file="${selected_archive}.sha256"
+  if [[ ! -f "$checksum_file" ]]; then
+    pause "❌ Checksum file not found: ${selected_basename}.sha256\n\nCannot verify integrity. Import aborted."
+    return
+  fi
+  
+  echo "Checksum file found: ${selected_basename}.sha256"
+  
+  # Verify checksum
+  echo "Verifying SHA256 checksum..."
+  if ! (cd "$HOME/Downloads" && sha256sum -c "$selected_basename.sha256" 2>&1 | grep -q "OK"); then
+    pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
+    return
+  fi
+  
+  echo "✅ Checksum verified successfully"
+  
+  # Show import confirmation
+  if ! whiptail --title "Confirm Import" \
+    --yesno "Ready to import base VM from:\n\n${selected_basename}\n\nThis will:\n• Extract the archive\n• Import the disk image to /var/lib/libvirt/images/\n• Create the VM definition\n• Configure for this system\n\nProceed with import?" \
+    16 78; then
+    pause "Import cancelled."
+    return
+  fi
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                          Importing Base VM                                     ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  
+  # Create temporary extraction directory
+  local temp_extract_dir="$HOME/.cache/gm-import-temp-$$"
+  mkdir -p "$temp_extract_dir"
+  
+  # Extract archive
+  echo "[1/5] Extracting archive (this may take a few minutes)..."
+  if ! tar -xzf "$selected_archive" -C "$temp_extract_dir"; then
+    rm -rf "$temp_extract_dir"
+    pause "❌ Failed to extract archive"
+    return
+  fi
+  
+  # Find the extracted directory (should be gm-base-export-YYYYMMDD-HHMMSS)
+  local extract_dir=$(find "$temp_extract_dir" -maxdepth 1 -type d -name "gm-base-export-*" | head -n1)
+  if [[ -z "$extract_dir" ]]; then
+    rm -rf "$temp_extract_dir"
+    pause "❌ Could not find extracted directory in archive"
+    return
+  fi
+  
+  echo "    ✓ Archive extracted"
+  
+  # Verify disk image exists
+  local source_disk="${extract_dir}/gm-base.qcow2"
+  if [[ ! -f "$source_disk" ]]; then
+    rm -rf "$temp_extract_dir"
+    pause "❌ Disk image not found in archive: gm-base.qcow2"
+    return
+  fi
+  
+  # Read metadata if available
+  local metadata_file="${extract_dir}/metadata.json"
+  if [[ -f "$metadata_file" ]]; then
+    echo ""
+    echo "[2/5] Reading metadata..."
+    local export_date script_name blockchain_height
+    export_date=$(jq -r '.export_date // "unknown"' "$metadata_file" 2>/dev/null || echo "unknown")
+    script_name=$(jq -r '.script_name // "unknown"' "$metadata_file" 2>/dev/null || echo "unknown")
+    blockchain_height=$(jq -r '.blockchain.height_at_export // "unknown"' "$metadata_file" 2>/dev/null || echo "unknown")
+    
+    echo "    Export date: $export_date"
+    echo "    Script: $script_name"
+    echo "    Blockchain height at export: $blockchain_height"
+    echo "    ✓ Metadata read"
+  fi
+  
+  # Copy disk image to libvirt images directory
+  echo ""
+  echo "[3/5] Copying disk image to /var/lib/libvirt/images/..."
+  local dest_disk="/var/lib/libvirt/images/${VM_NAME}.qcow2"
+  
+  # Check if VM domain already exists
+  if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+    echo "    ⚠ VM '$VM_NAME' already exists"
+    if whiptail --title "Existing VM Found" \
+      --yesno "VM '$VM_NAME' already exists.\n\nDo you want to delete it and import the new one?" \
+      10 70; then
+      echo "    Shutting down and removing existing VM..."
+      
+      # Force shutdown if running
+      if [[ "$(vm_state "$VM_NAME")" != "shut off" ]]; then
+        virsh_cmd destroy "$VM_NAME" 2>/dev/null || true
+        sleep 2
+      fi
+      
+      # Undefine the domain
+      virsh_cmd undefine "$VM_NAME" 2>/dev/null || true
+      sleep 1
+      
+      # Now remove the disk
+      if [[ -f "$dest_disk" ]]; then
+        sudo rm -f "$dest_disk"
+      fi
+    else
+      rm -rf "$temp_extract_dir"
+      pause "Import cancelled - VM already exists."
+      return
+    fi
+  elif [[ -f "$dest_disk" ]]; then
+    # Disk exists but no VM domain - just remove disk
+    echo "    ⚠ Disk already exists at $dest_disk"
+    if whiptail --title "Existing Disk Found" \
+      --yesno "Disk $dest_disk already exists.\n\nDo you want to overwrite it?" \
+      10 70; then
+      echo "    Removing existing disk..."
+      sudo rm -f "$dest_disk"
+    else
+      rm -rf "$temp_extract_dir"
+      pause "Import cancelled - disk already exists."
+      return
+    fi
+  fi
+  
+  sudo cp "$source_disk" "$dest_disk" || {
+    rm -rf "$temp_extract_dir"
+    pause "❌ Failed to copy disk image"
+    return
+  }
+  
+  sudo chown root:root "$dest_disk"
+  sudo chmod 644 "$dest_disk"
+  echo "    ✓ Disk image copied"
+  
+  # Clean up extraction directory
+  rm -rf "$temp_extract_dir"
+  
+  # Let user configure defaults for resource allocation
+  echo ""
+  echo "[4/5] Configuring VM resources..."
+  
+  if ! configure_defaults_direct; then
+    echo "    Using default resource settings"
+  fi
+  
+  # Prompt for initial resources (in case user wants to start it right away)
+  if ! prompt_sync_resources; then
+    # Use defaults if cancelled
+    detect_host_resources
+    SYNC_RAM_MB=$HOST_SUGGEST_SYNC_RAM
+    SYNC_VCPUS=$HOST_SUGGEST_SYNC_VCPUS
+  fi
+  
+  # Inject monitoring SSH key BEFORE creating the VM domain
+  # This must happen while the disk is not in use by any VM
+  echo ""
+  echo "[5/5] Configuring monitoring access..."
+  
+  # Ensure SSH key exists (but don't call ensure_monitor_ssh since VM doesn't exist yet)
+  mkdir -p "$SSH_KEY_DIR"
+  chmod 700 "$SSH_KEY_DIR"
+  if [[ ! -f "$SSH_KEY_PATH" ]]; then
+    ssh-keygen -t ed25519 -N "" -f "$SSH_KEY_PATH" -q >/dev/null 2>&1
+  fi
+  
+  local pub
+  pub=$(cat "${SSH_KEY_PATH}.pub")
+  
+  sudo virt-customize -a "$dest_disk" \
+    --no-selinux-relabel \
+    --run-command "mkdir -p /root/.ssh; chmod 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys" \
+    --run-command "grep -qF '$pub' /root/.ssh/authorized_keys || echo '$pub' >> /root/.ssh/authorized_keys" \
+    2>&1 | grep -v "random seed" >&2
+  
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "    ⚠ Warning: Failed to inject SSH key (monitoring may not work)"
+  else
+    echo "    ✓ Monitoring access configured"
+  fi
+  
+  # Create VM domain definition
+  echo ""
+  echo "    Creating VM domain..."
+  sudo virt-install \
+    --name "$VM_NAME" \
+    --memory "$SYNC_RAM_MB" --vcpus "$SYNC_VCPUS" --cpu host \
+    --disk "path=$dest_disk,format=qcow2,bus=virtio" \
+    --network "network=default,model=virtio" \
+    --osinfo alpinelinux3.18 \
+    --graphics none --noautoconsole \
+    --import >/dev/null 2>&1
+  
+  # virt-install --import automatically starts the VM, but we want it stopped
+  echo "    Stopping VM..."
+  virsh_cmd shutdown "$VM_NAME" 2>/dev/null || true
+  sleep 3
+  if [[ "$(vm_state "$VM_NAME")" != "shut off" ]]; then
+    virsh_cmd destroy "$VM_NAME" 2>/dev/null || true
+    sleep 2
+  fi
+  
+  echo "    ✓ VM domain created"
+  
+  # Success!
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                        Import Complete!                                        ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "✅ Base VM '$VM_NAME' imported successfully!"
+  echo ""
+  echo "📋 VM Configuration:"
+  echo "   Initial resources: ${SYNC_VCPUS} vCPUs, ${SYNC_RAM_MB} MiB RAM"
+  echo "   Disk: $dest_disk"
+  echo "   Status: Stopped and ready"
+  echo ""
+  echo "🔒 Security:"
+  echo "   • Fresh SSH keys will be generated on first boot"
+  echo "   • Fresh Tor hidden service (.onion) will be generated"
+  echo "   • Peer databases are empty (will discover peers independently)"
+  echo ""
+  echo "📌 Next steps:"
+  echo "   1. Choose 'Monitor Base VM Sync' to start and check sync status"
+  echo "   2. If blockchain needs updating, it will sync the missing blocks"
+  echo "   3. Once synced, you can clone the VM or export it again"
+  echo ""
+  
+  pause "Import complete! VM '$VM_NAME' is ready.\n\nChoose 'Monitor Base VM Sync' to start it."
+}
+
+################################################################################
+# Create Base VM (Action 1)
+################################################################################
+
+# create_base_vm: Main entry point for Action 1
+# Purpose: Offers choice between building from scratch or importing
+# Flow:
+#   1. Check if VM already exists (abort if it does)
+#   2. Present menu: "Build from scratch" or "Import from file"
+#   3. Call appropriate function based on selection
+create_base_vm(){
+  # Check if VM already exists
+  if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+    pause "A VM named '$VM_NAME' already exists."
+    return
+  fi
+  
+  # Present choice menu
+  local choice
+  choice=$(whiptail --title "Create Base VM" \
+    --menu "How would you like to create the base VM?\n" 16 78 2 \
+    "1" "Build from scratch (compile: 2+ hours, sync: 24-28 hours)" \
+    "2" "Import from file (faster)" \
+    3>&1 1>&2 2>&3) || return
+  
+  case "$choice" in
+    1) create_base_vm_from_scratch ;;
+    2) import_base_vm ;;
+    *) return ;;
+  esac
+}
+
+# create_base_vm_from_scratch: Build base VM from scratch (original create_base_vm logic)
 # Purpose: Main function for Action 1 - creates the initial VM from scratch
 # Flow:
 #   1. Check if VM already exists (abort if it does)
@@ -1747,18 +2080,12 @@ Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
 #   6. Build Garbageman (Bitcoin Knots fork) INSIDE the VM using virt-customize
 #   7. Configure bitcoind service, Tor hidden service, user accounts
 #   8. Create libvirt domain definition (but don't start VM yet)
-# Note: This process takes 10-30 minutes depending on host resources
+# Note: This process takes 2+ hours depending on host resources
 # Side effects: Creates VM disk at /var/lib/libvirt/images/${VM_NAME}.qcow2
-create_base_vm(){
+create_base_vm_from_scratch(){
   # Start sudo keepalive to prevent timeout during long build process
   # Force it to start since we'll be using sudo virt-customize extensively
   sudo_keepalive_start force
-  
-  # If the VM already exists, we don't recreate it.
-  if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    pause "A VM named '$VM_NAME' already exists."
-    return
-  fi
 
   ensure_tools
 
@@ -2327,15 +2654,29 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
       
       # Check if blocks have increased (catching up)
       if [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
-        # Blocks are advancing - continue monitoring normally
-        sync_status_msg="Syncing new blocks (was ${block_age_hours}h behind)..."
+        # Blocks are advancing - check if we're caught up
+        if [[ "$is_stale" == "false" ]]; then
+          # Tip is no longer stale, we've caught up to recent blocks
+          stale_tip_detected=false
+          sync_status_msg="Caught up to current tip"
+        else
+          # Still catching up to current (tip still >2h old means more blocks to sync)
+          sync_status_msg="Syncing new blocks (was ${block_age_hours}h behind)..."
+        fi
       elif [[ "$wait_elapsed" -lt 120 ]]; then
         # Still waiting for peers and updates (up to 2 minutes)
         sync_status_msg="Waiting for sync (${wait_remaining}s left, ${peers} peers connected)..."
       else
-        # Waited 2 minutes and no progress - consider it caught up anyway
-        stale_tip_detected=false
-        sync_status_msg="No new blocks after 2min wait, considering synced"
+        # Waited 2 minutes and no progress
+        # Check if tip is still stale - if not, we can clear the flag
+        if [[ "$is_stale" == "false" ]]; then
+          # Tip is no longer stale (somehow caught up), clear flag
+          stale_tip_detected=false
+          sync_status_msg="Synced to current tip"
+        else
+          # Still stale, keep waiting indefinitely (don't mark as complete until truly synced)
+          sync_status_msg="Stale tip (${block_age_hours}h old), waiting for peers (${peers} connected)..."
+        fi
       fi
     fi
 
@@ -2380,8 +2721,11 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
       if [[ "$stale_tip_detected" == "false" ]]; then
         # No stale tip detected or we've finished waiting - OK to complete
         should_complete=true
+      elif [[ "$blocks" -ge "$headers" && "$pct" -ge 99 ]]; then
+        # Stale tip was detected, but blocks caught up to headers - consider complete
+        should_complete=true
       elif [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
-        # Stale tip was detected but blocks are advancing - wait for them to catch up
+        # Stale tip was detected and blocks are still advancing - keep waiting
         should_complete=false
       else
         # Stale tip detected, waited 2 minutes, no new blocks - consider done
@@ -2487,6 +2831,7 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
       echo "╚════════════════════════════════════════════════════════════════════════════════╝"
       echo ""
       read -p "Press Enter to return to main menu..."
+      clear
       return
     fi
     
@@ -3289,17 +3634,18 @@ show_onion(){
 # Quick VM Controls (Action 3)
 ################################################################################
 
-# quick_control: Simple start/stop/status/export menu for base VM
-# Purpose: Convenient VM power management and export without full monitoring
+# quick_control: Simple start/stop/status/export/delete menu for base VM
+# Purpose: Convenient VM power management, export, and deletion without full monitoring
 # Features:
 #   - Displays VM state in menu header
 #   - If VM is running, shows .onion address and block height (like clone management)
-#   - Provides start/stop/state/export actions
+#   - Provides start/stop/state/export/delete actions
 # Actions:
 #   - start: Power on the VM (virsh start)
 #   - stop: Graceful shutdown (virsh shutdown)
 #   - state: Display current VM state and IP address
 #   - export: Create sanitized, portable export for transfer to another system
+#   - delete: Permanently delete VM and disk (requires double confirmation)
 #   - back: Return to main menu
 # Loop: Menu stays open after actions (user must select "back" to exit)
 quick_control(){
@@ -3341,11 +3687,12 @@ quick_control(){
     fi
     
     local sub
-    sub=$(whiptail --title "Quick VM Controls" --menu "Control VM: ${VM_NAME}\nCurrent state: ${current_state}${extra_info}\n\nChoose an action:" 22 78 7 \
+    sub=$(whiptail --title "Quick VM Controls" --menu "Control VM: ${VM_NAME}\nCurrent state: ${current_state}${extra_info}\n\nChoose an action:" 24 78 8 \
           "start" "Power on the VM" \
           "stop" "Gracefully shutdown the VM" \
           "state" "Check current VM status" \
           "export" "Export VM for transfer to another system" \
+          "delete" "Delete VM permanently (requires confirmation)" \
           "back" "Return to main menu" \
           3>&1 1>&2 2>&3) || return
     case "$sub" in
@@ -3372,6 +3719,49 @@ quick_control(){
       export)
         export_base_vm
         ;;
+      delete)
+        # Confirmation dialog with strong warning
+        if whiptail --title "⚠️  DELETE BASE VM" \
+          --yesno "Are you SURE you want to delete '${VM_NAME}'?\n\n⚠️  WARNING: This action is PERMANENT and IRREVERSIBLE!\n\nThis will:\n• Destroy the VM definition\n• Delete the disk image (all blockchain data)\n• Remove all configuration\n\nYou will need to rebuild or re-import to use this VM again.\n\nProceed to confirmation step?" \
+          20 78; then
+          
+          # Secondary confirmation - require typing VM name
+          local confirm_name
+          confirm_name=$(whiptail --inputbox "Type the exact VM name to confirm deletion:\n\nVM name: ${VM_NAME}" 12 78 3>&1 1>&2 2>&3)
+          
+          if [[ "$confirm_name" == "$VM_NAME" ]]; then
+            echo "Deleting VM '${VM_NAME}'..."
+            
+            # Stop VM if running
+            local vm_state_now
+            vm_state_now=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
+            if [[ "$vm_state_now" == "running" ]]; then
+              echo "  Stopping VM..."
+              sudo virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+              sleep 2
+            fi
+            
+            # Undefine VM (removes domain definition)
+            echo "  Removing VM definition..."
+            sudo virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+            
+            # Delete disk image
+            local disk="/var/lib/libvirt/images/${VM_NAME}.qcow2"
+            if [[ -f "$disk" ]]; then
+              echo "  Deleting disk image: $disk"
+              sudo rm -f "$disk" || true
+            fi
+            
+            echo ""
+            pause "✅ VM '${VM_NAME}' has been permanently deleted.\n\nYou can create a new base VM using Option 1 from the main menu."
+            return  # Exit to main menu after deletion
+          else
+            pause "Deletion cancelled - VM name did not match."
+          fi
+        else
+          pause "Deletion cancelled."
+        fi
+        ;;
       back)
         return
         ;;
@@ -3390,7 +3780,7 @@ quick_control(){
 # Menu Options:
 #   1. Create Base VM - Build and configure initial VM (runs once)
 #   2. Monitor Base VM Sync - Start VM and monitor IBD progress
-#   3. Manage Base VM - Simple start/stop/status/export controls
+#   3. Manage Base VM - Simple start/stop/status/export/delete controls
 #   4. Create Clone VMs - Create additional Tor-only nodes
 #   5. Manage Clone VMs - Start, stop, or delete clone VMs
 #   6. Capacity Suggestions - Show host-aware resource recommendations
@@ -3422,7 +3812,7 @@ Base VM exists: ${base_exists}"
     case "$choice" in
       1) create_base_vm ;;         # Action 1: Build Alpine VM, compile Garbageman inside, configure services
       2) monitor_sync ;;           # Action 2: Configure resources, start VM, monitor IBD progress
-      3) quick_control ;;          # Action 3: Simple start/stop/status/export controls
+      3) quick_control ;;          # Action 3: Simple start/stop/status/export/delete controls
       4) clone_menu ;;             # Action 4: Create Tor-only clones from synced base
       5) clone_management_menu ;;  # Action 5: Manage existing clones (start/stop/delete)
       6) show_capacity_suggestions ;;  # Action 6: Show host-aware resource calculations
