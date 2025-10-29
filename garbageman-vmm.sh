@@ -2430,6 +2430,396 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
 }
 
 ################################################################################
+# Export Base VM (Action 3 - Manage Base VM submenu)
+################################################################################
+
+# export_base_vm: Create a sanitized, portable export of the base VM
+# Purpose: Package the base VM for import on another system
+# Security: Removes all sensitive/identifying information:
+#   - Tor hidden service keys (forces fresh .onion address)
+#   - SSH authorized keys (host-specific monitoring key)
+#   - Tor control cookie and state data
+#   - Bitcoin peer databases (peers.dat, anchors.dat, banlist.dat)
+#   - Bitcoin debug logs (may contain peer IPs)
+#   - Machine identifiers (machine-id, SSH host keys)
+#   - System logs
+# Flow:
+#   1. Check base VM exists and is synced (warn if not)
+#   2. Ensure base VM is shut off (graceful shutdown if running)
+#   3. Create temporary clone for sanitization (preserves original)
+#   4. Sanitize clone using virt-sysprep + manual cleanup
+#   5. Compress disk image and create metadata JSON
+#   6. Package as tar.gz archive
+#   7. Clean up temporary clone
+# Output: Creates gm-base-export-YYYYMMDD-HHMMSS.tar.gz in ~/Downloads
+#         Contains: sanitized qcow2 disk + metadata.json
+export_base_vm(){
+  ensure_tools
+  
+  # Check if base VM exists
+  sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1 || die "Base VM '$VM_NAME' not found. Nothing to export."
+  
+  # Check if VM is synced (optional warning, not blocking)
+  echo "Checking sync status..."
+  local current_state
+  current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
+  
+  local sync_warning=""
+  if [[ "$current_state" == "running" ]]; then
+    local ip
+    ip=$(vm_ip "$VM_NAME" 2>/dev/null || echo "")
+    
+    if [[ -n "$ip" ]]; then
+      local blocks headers
+      local info
+      info=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' 2>/dev/null || echo "")
+      blocks=$(jq -r '.blocks // ""' <<<"$info" 2>/dev/null || echo "")
+      headers=$(jq -r '.headers // ""' <<<"$info" 2>/dev/null || echo "")
+      
+      if [[ -n "$blocks" && -n "$headers" && "$blocks" != "$headers" ]]; then
+        sync_warning="\n⚠️  WARNING: Blockchain may not be fully synced (blocks: $blocks / $headers)"
+      fi
+    fi
+  fi
+  
+  # Confirm export with user
+  if ! whiptail --title "Export Base VM" --yesno \
+    "This will create a sanitized, portable export of '$VM_NAME'.\n\n\
+Security measures:\n\
+• Removes Tor keys (forces fresh .onion on import)\n\
+• Removes SSH keys and machine identifiers\n\
+• Clears peer databases and logs\n\
+• Resets to generic Tor-only configuration\n\n\
+Export will be saved to: ~/Downloads/\n\
+Size: ~10-15 GB compressed (may take 10-30 minutes)\n\n\
+The base VM will be shut down during export (if running).\n\
+Original VM will remain intact.${sync_warning}\n\n\
+Proceed with export?" 24 78; then
+    return
+  fi
+  
+  # Generate export name with timestamp
+  local export_timestamp
+  export_timestamp=$(date +%Y%m%d-%H%M%S)
+  local export_name="gm-base-export-${export_timestamp}"
+  local export_dir="$HOME/Downloads/${export_name}"
+  local temp_clone="${VM_NAME}-export-temp"
+  
+  # Create export directory
+  mkdir -p "$export_dir" || die "Failed to create export directory: $export_dir"
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                          Exporting Base VM                                     ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  
+  # Step 1: Shut down base VM if running
+  echo "[1/7] Ensuring base VM is shut down..."
+  current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
+  
+  if [[ "$current_state" == "running" ]]; then
+    echo "      Base VM is running. Shutting down gracefully..."
+    echo "      This may take up to 3 minutes for bitcoind to close cleanly."
+    
+    sudo virsh shutdown "$VM_NAME" >/dev/null 2>&1 || true
+    
+    local timeout=180
+    local elapsed=0
+    local check_interval=5
+    
+    while [[ $elapsed -lt $timeout ]]; do
+      current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
+      if [[ "$current_state" != "running" ]]; then
+        echo "      ✓ Base VM shut down successfully after ${elapsed} seconds."
+        break
+      fi
+      
+      if [[ $((elapsed % 15)) -eq 0 && $elapsed -gt 0 ]]; then
+        echo "      Still waiting... (${elapsed}s elapsed)"
+      fi
+      
+      sleep "$check_interval"
+      elapsed=$((elapsed + check_interval))
+    done
+    
+    current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
+    if [[ "$current_state" == "running" ]]; then
+      echo "      Graceful shutdown timed out. Forcing shutdown..."
+      sudo virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+      sleep 2
+      echo "      ✓ Base VM forcefully stopped."
+    fi
+  else
+    echo "      ✓ Base VM already shut down."
+  fi
+  
+  # Step 2: Create temporary clone for sanitization
+  echo ""
+  echo "[2/7] Creating temporary clone for sanitization..."
+  local temp_disk="/var/lib/libvirt/images/${temp_clone}.qcow2"
+  
+  # Clean up any previous failed export attempt
+  if sudo virsh dominfo "$temp_clone" >/dev/null 2>&1; then
+    echo "      Cleaning up previous temporary clone..."
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+  fi
+  
+  sudo virt-clone --original "$VM_NAME" --name "$temp_clone" --file "$temp_disk" --auto-clone || {
+    echo "      ✗ Failed to create temporary clone"
+    rm -rf "$export_dir"
+    die "Export failed during cloning"
+  }
+  echo "      ✓ Temporary clone created: $temp_clone"
+  
+  # Step 3: Sanitize using virt-sysprep (removes SSH keys, machine-id, logs, etc.)
+  echo ""
+  echo "[3/7] Sanitizing VM (removing sensitive data)..."
+  echo "      This may take a few minutes..."
+  
+  # virt-sysprep removes: SSH keys, machine-id, logs, random-seed, etc.
+  # Use --operations to be explicit about what we're cleaning
+  sudo virt-sysprep -d "$temp_clone" \
+    --operations defaults,-lvm-uuids \
+    2>&1 | grep -v "random seed" || {
+    echo "      ✗ virt-sysprep failed"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir"
+    die "Export failed during sanitization"
+  }
+  echo "      ✓ Basic sanitization complete (SSH keys, logs, machine-id removed)"
+  
+  # Step 4: Additional cleanup specific to Bitcoin/Tor
+  echo ""
+  echo "[4/7] Removing Bitcoin/Tor sensitive data..."
+  
+  # Remove Tor hidden service keys and state
+  sudo virt-customize -d "$temp_clone" --no-selinux-relabel \
+    --run-command "rm -rf /var/lib/tor/bitcoin-service || true" \
+    --run-command "rm -rf /var/lib/tor/* || true" \
+    --run-command "rm -f ${BITCOIN_DATADIR}/onion_private_key || true" \
+    2>&1 | grep -v "random seed" >&2 || {
+    echo "      ✗ Failed to remove Tor keys"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir"
+    die "Export failed during Tor cleanup"
+  }
+  
+  # Remove Bitcoin peer databases and debug logs
+  sudo virt-customize -d "$temp_clone" --no-selinux-relabel \
+    --run-command "rm -f ${BITCOIN_DATADIR}/peers.dat || true" \
+    --run-command "rm -f ${BITCOIN_DATADIR}/anchors.dat || true" \
+    --run-command "rm -f ${BITCOIN_DATADIR}/banlist.dat || true" \
+    --run-command "rm -f ${BITCOIN_DATADIR}/debug.log || true" \
+    --run-command "rm -f ${BITCOIN_DATADIR}/.lock || true" \
+    2>&1 | grep -v "random seed" >&2 || {
+    echo "      ✗ Failed to remove Bitcoin peer data"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir"
+    die "Export failed during Bitcoin cleanup"
+  }
+  
+  # Reset bitcoin.conf to generic Tor-only configuration
+  sudo virt-customize -d "$temp_clone" --no-selinux-relabel \
+    --run-command "cat > /etc/bitcoin/bitcoin.conf <<'BTCCONF'
+server=1
+daemon=1
+prune=750
+dbcache=450
+maxconnections=25
+
+# Tor-only configuration
+proxy=127.0.0.1:9050
+listen=1
+bind=127.0.0.1
+onlynet=onion
+
+[main]
+BTCCONF" \
+    --run-command "chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf" \
+    --run-command "chmod 640 /etc/bitcoin/bitcoin.conf" \
+    2>&1 | grep -v "random seed" >&2 || {
+    echo "      ✗ Failed to reset bitcoin.conf"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir"
+    die "Export failed during bitcoin.conf reset"
+  }
+  
+  # Reset hostname to generic gm-base
+  sudo virt-customize -d "$temp_clone" --no-selinux-relabel \
+    --hostname "gm-base" \
+    2>&1 | grep -v "random seed" >&2 || true
+  
+  echo "      ✓ Bitcoin/Tor data sanitized"
+  
+  # Step 5: Gather metadata before undefining the domain
+  echo ""
+  echo "[5/7] Gathering metadata..."
+  
+  # Get VM specs
+  local vm_ram vm_vcpus vm_disk_size
+  vm_ram=$(sudo virsh dominfo "$temp_clone" | grep "Max memory:" | awk '{print $3}')
+  vm_vcpus=$(sudo virsh dominfo "$temp_clone" | grep "CPU(s):" | awk '{print $2}')
+  vm_disk_size=$(sudo qemu-img info "$temp_disk" | grep "virtual size:" | awk '{print $3, $4}')
+  
+  # Try to get blockchain height from previous status check
+  local blockchain_height="unknown"
+  if [[ -n "$blocks" ]]; then
+    blockchain_height="$blocks"
+  fi
+  
+  # Create metadata JSON
+  local metadata_file="$export_dir/metadata.json"
+  cat > "$metadata_file" <<METADATA
+{
+  "export_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "export_timestamp": "$export_timestamp",
+  "vm_name": "$VM_NAME",
+  "script_name": "garbageman-vmm.sh",
+  "vm_specs": {
+    "ram_mb": "$vm_ram",
+    "vcpus": "$vm_vcpus",
+    "disk_size": "$vm_disk_size",
+    "disk_format": "qcow2"
+  },
+  "blockchain": {
+    "height_at_export": "$blockchain_height",
+    "pruned": true,
+    "prune_target": "750 MiB"
+  },
+  "network_config": {
+    "tor_only": true,
+    "onlynet": "onion",
+    "note": "Fresh Tor keys will be generated on first boot"
+  },
+  "repository": {
+    "url": "$GM_REPO",
+    "branch": "$GM_BRANCH"
+  },
+  "sanitization": {
+    "tor_keys_removed": true,
+    "ssh_keys_removed": true,
+    "peer_databases_cleared": true,
+    "logs_cleared": true,
+    "machine_id_reset": true
+  },
+  "import_notes": [
+    "This VM has been sanitized for secure import",
+    "Tor hidden service keys have been removed - fresh .onion will be generated",
+    "SSH host keys have been removed - will be regenerated on first boot",
+    "Peer databases cleared - VM will discover new peers independently",
+    "Bitcoin configuration reset to generic Tor-only setup",
+    "Recommended: 2+ GB RAM, 1+ vCPU for normal operation",
+    "Initial sync resources were higher, but blockchain is already synced"
+  ]
+}
+METADATA
+  echo "      ✓ Metadata created: metadata.json"
+  
+  # Step 6: Copy disk image to export directory and compress
+  echo ""
+  echo "[6/7] Copying and compressing disk image..."
+  echo "      This will take several minutes (10-15 GB)..."
+  
+  # Copy the qcow2 disk to export directory
+  sudo cp "$temp_disk" "$export_dir/${VM_NAME}.qcow2" || {
+    echo "      ✗ Failed to copy disk image"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir"
+    die "Export failed during disk copy"
+  }
+  
+  # Fix ownership so user can access the exported files
+  sudo chown -R "$USER:$USER" "$export_dir"
+  
+  echo "      ✓ Disk image copied"
+  
+  # Create compressed archive
+  echo "      Creating compressed archive (this may take 10-20 minutes)..."
+  local archive_name="${export_name}.tar.gz"
+  local archive_path="$HOME/Downloads/${archive_name}"
+  
+  tar -czf "$archive_path" -C "$HOME/Downloads" "$export_name" || {
+    echo "      ✗ Failed to create compressed archive"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir"
+    die "Export failed during compression"
+  }
+  
+  local archive_size
+  archive_size=$(du -h "$archive_path" | cut -f1)
+  echo "      ✓ Archive created: ${archive_name} (${archive_size})"
+  
+  # Generate SHA256 checksum for archive verification
+  echo "      Generating SHA256 checksum..."
+  local checksum_file="${archive_path}.sha256"
+  (cd "$HOME/Downloads" && sha256sum "${archive_name}" > "${archive_name}.sha256") || {
+    echo "      ⚠ Warning: Failed to generate checksum file"
+  }
+  
+  if [[ -f "$checksum_file" ]]; then
+    echo "      ✓ Checksum created: ${archive_name}.sha256"
+  fi
+  
+  # Step 7: Cleanup
+  echo ""
+  echo "[7/7] Cleaning up temporary files..."
+  
+  # Remove temporary clone
+  sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+  sudo rm -f "$temp_disk" 2>/dev/null || true
+  
+  # Remove uncompressed export directory (we have the .tar.gz)
+  rm -rf "$export_dir"
+  
+  echo "      ✓ Temporary files removed"
+  
+  # Success!
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                        Export Complete!                                        ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "📦 Exported files:"
+  echo "   Archive:  $archive_path"
+  echo "   Checksum: ${archive_path}.sha256"
+  echo "   Size:     $archive_size"
+  echo ""
+  echo "📋 Archive contains:"
+  echo "   • ${VM_NAME}.qcow2 (sanitized disk image)"
+  echo "   • metadata.json (VM specifications and import info)"
+  echo ""
+  echo "🔐 Verify integrity after transfer:"
+  echo "   cd ~/Downloads && sha256sum -c ${archive_name}.sha256"
+  echo ""
+  echo "🔒 Security: All sensitive data has been removed:"
+  echo "   ✓ Tor keys cleared (fresh .onion on import)"
+  echo "   ✓ SSH keys removed (regenerated on import)"
+  echo "   ✓ Peer databases cleared"
+  echo "   ✓ Logs and machine identifiers reset"
+  echo ""
+  echo "📤 This archive can be safely transferred to another system."
+  echo "   Use the import feature to create gm-base from this export."
+  echo ""
+  
+  pause "Export saved to: $archive_path"
+}
+
+################################################################################
 # Clone VM (Action 4)
 ################################################################################
 
@@ -2883,10 +3273,11 @@ quick_control(){
     fi
     
     local sub
-    sub=$(whiptail --title "Quick VM Controls" --menu "Control VM: ${VM_NAME}\nCurrent state: ${current_state}${extra_info}\n\nChoose an action:" 20 78 6 \
+    sub=$(whiptail --title "Quick VM Controls" --menu "Control VM: ${VM_NAME}\nCurrent state: ${current_state}${extra_info}\n\nChoose an action:" 22 78 7 \
           "start" "Power on the VM" \
           "stop" "Gracefully shutdown the VM" \
           "state" "Check current VM status" \
+          "export" "Export VM for transfer to another system" \
           "back" "Return to main menu" \
           3>&1 1>&2 2>&3) || return
     case "$sub" in
@@ -2909,6 +3300,9 @@ quick_control(){
         fi
         
         pause "$info"
+        ;;
+      export)
+        export_base_vm
         ;;
       back)
         return
