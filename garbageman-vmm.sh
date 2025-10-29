@@ -2037,6 +2037,218 @@ import_base_vm(){
   pause "Import complete! VM '$VM_NAME' is ready.\n\nChoose 'Monitor Base VM Sync' to start it."
 }
 
+# import_from_github: Import base VM from GitHub release
+# Purpose: Download and import pre-built VM from GitHub releases
+# Flow:
+#   1. Fetch available releases from GitHub API
+#   2. Let user select a release tag
+#   3. Download all parts with progress indicators
+#   4. Reassemble the archive
+#   5. Verify checksum
+#   6. Hand off to standard import process
+# Prerequisites: curl or wget for downloads, jq for JSON parsing
+# Side effects: Downloads ~22GB to /tmp, then imports to libvirt
+import_from_github(){
+  local repo="paulscode/garbageman-vmm"
+  local api_url="https://api.github.com/repos/$repo/releases"
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                    Import Base VM from GitHub Release                          ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  
+  # Check for required tools
+  if ! command -v jq >/dev/null 2>&1; then
+    pause "❌ Required tool 'jq' not found.\n\nInstall with: sudo apt install jq"
+    return
+  fi
+  
+  local download_tool=""
+  if command -v curl >/dev/null 2>&1; then
+    download_tool="curl"
+  elif command -v wget >/dev/null 2>&1; then
+    download_tool="wget"
+  else
+    pause "❌ Neither 'curl' nor 'wget' found.\n\nInstall with: sudo apt install curl"
+    return
+  fi
+  
+  echo "Fetching available releases from GitHub..."
+  local releases_json
+  if [[ "$download_tool" == "curl" ]]; then
+    releases_json=$(curl -s "$api_url" 2>/dev/null)
+  else
+    releases_json=$(wget -q -O- "$api_url" 2>/dev/null)
+  fi
+  
+  if [[ -z "$releases_json" ]] || ! echo "$releases_json" | jq -e . >/dev/null 2>&1; then
+    pause "❌ Failed to fetch releases from GitHub.\n\nCheck your internet connection."
+    return
+  fi
+  
+  # Parse releases and build menu
+  local tags=()
+  local tag_names=()
+  local menu_items=()
+  
+  while IFS= read -r tag; do
+    [[ -z "$tag" ]] && continue
+    tags+=("$tag")
+    local tag_name=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$tag\") | .name // .tag_name")
+    local published=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$tag\") | .published_at" | cut -d'T' -f1)
+    tag_names+=("$tag_name")
+    menu_items+=("$tag" "$tag_name ($published)")
+  done < <(echo "$releases_json" | jq -r '.[].tag_name')
+  
+  if [[ ${#tags[@]} -eq 0 ]]; then
+    pause "No releases found with VM exports."
+    return
+  fi
+  
+  echo "Found ${#tags[@]} release(s)"
+  echo ""
+  
+  # Let user select release
+  local selected_tag
+  selected_tag=$(whiptail --title "Select GitHub Release" \
+    --menu "Choose a release to download and import:" 20 78 10 \
+    "${menu_items[@]}" \
+    3>&1 1>&2 2>&3) || return
+  
+  echo "Selected: $selected_tag"
+  echo ""
+  
+  # Get assets for selected release
+  local release_assets
+  release_assets=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$selected_tag\") | .assets")
+  
+  # Find all part files and checksum
+  local part_urls=()
+  local part_names=()
+  local checksum_url=""
+  local checksum_name=""
+  
+  while IFS='|' read -r name url; do
+    [[ -z "$name" ]] && continue
+    if [[ "$name" =~ \.part[0-9]+$ ]]; then
+      part_names+=("$name")
+      part_urls+=("$url")
+    elif [[ "$name" == "gm-base-export.tar.gz.sha256" ]]; then
+      checksum_name="$name"
+      checksum_url="$url"
+    fi
+  done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
+  
+  if [[ ${#part_urls[@]} -eq 0 ]]; then
+    pause "❌ No export parts found in release $selected_tag"
+    return
+  fi
+  
+  # Warn about download size
+  echo "⚠  Download size: ~22 GB (${#part_urls[@]} parts)"
+  echo ""
+  if ! whiptail --title "Confirm Download" \
+    --yesno "This will download approximately 22 GB of data.\n\nParts to download: ${#part_urls[@]}\nRelease: $selected_tag\n\nContinue?" \
+    12 70; then
+    echo "Download cancelled."
+    return
+  fi
+  
+  # Create temporary download directory
+  local temp_dir=$(mktemp -d -t gm-github-import-XXXXXX)
+  trap "rm -rf '$temp_dir'" RETURN
+  
+  echo ""
+  echo "Downloading to: $temp_dir"
+  echo ""
+  
+  # Download all parts with progress
+  for i in "${!part_urls[@]}"; do
+    local part_name="${part_names[$i]}"
+    local part_url="${part_urls[$i]}"
+    local part_num=$((i + 1))
+    
+    echo "[Part $part_num/${#part_urls[@]}] Downloading $part_name..."
+    
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -L --progress-bar -o "$temp_dir/$part_name" "$part_url" || {
+        pause "❌ Failed to download $part_name"
+        return
+      }
+    else
+      wget --show-progress -O "$temp_dir/$part_name" "$part_url" || {
+        pause "❌ Failed to download $part_name"
+        return
+      }
+    fi
+  done
+  
+  # Download checksum file if available
+  if [[ -n "$checksum_url" ]]; then
+    echo ""
+    echo "Downloading checksum file..."
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -sL -o "$temp_dir/$checksum_name" "$checksum_url"
+    else
+      wget -q -O "$temp_dir/$checksum_name" "$checksum_url"
+    fi
+  fi
+  
+  # Reassemble the archive
+  echo ""
+  echo "Reassembling archive..."
+  cat "$temp_dir"/gm-base-export.tar.gz.part* > "$temp_dir/gm-base-export.tar.gz"
+  echo "    ✓ Archive reassembled"
+  
+  # Verify checksum if available
+  if [[ -f "$temp_dir/$checksum_name" ]]; then
+    echo ""
+    echo "Verifying checksum..."
+    cd "$temp_dir"
+    if sha256sum -c <(grep "gm-base-export.tar.gz$" "$checksum_name" | sed 's/part.*gm-base-export.tar.gz/gm-base-export.tar.gz/') 2>&1 | grep -q "OK"; then
+      echo "    ✓ Checksum verified"
+    else
+      pause "❌ Checksum verification failed!"
+      return
+    fi
+    cd - >/dev/null
+  fi
+  
+  # Move to Downloads and create matching .sha256 file
+  echo ""
+  echo "Moving to ~/Downloads for import..."
+  local timestamp=$(date +%Y%m%d-%H%M%S)
+  local final_name="gm-base-export-${timestamp}-github.tar.gz"
+  mv "$temp_dir/gm-base-export.tar.gz" "$HOME/Downloads/$final_name"
+  
+  if [[ -f "$temp_dir/$checksum_name" ]]; then
+    # Create checksum for the final file
+    (cd "$HOME/Downloads" && sha256sum "$final_name" > "${final_name}.sha256")
+  fi
+  
+  echo "    ✓ Saved to ~/Downloads/$final_name"
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                        Download Complete!                                      ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  
+  # Ask if user wants to import now
+  if whiptail --title "Import Now?" \
+    --yesno "Download complete!\n\nWould you like to import this VM now?" \
+    10 70; then
+    # Call standard import, but we need to set up the selection to point to our file
+    # For now, just inform the user
+    echo ""
+    echo "Starting import process..."
+    echo ""
+    import_base_vm
+  else
+    pause "Download complete!\n\nThe archive is in ~/Downloads/$final_name\nYou can import it later via 'Create Base VM' → 'Import from file'"
+  fi
+}
+
 ################################################################################
 # Create Base VM (Action 1)
 ################################################################################
@@ -2057,14 +2269,16 @@ create_base_vm(){
   # Present choice menu
   local choice
   choice=$(whiptail --title "Create Base VM" \
-    --menu "How would you like to create the base VM?\n" 16 78 2 \
+    --menu "How would you like to create the base VM?\n" 18 78 3 \
     "1" "Build from scratch (compile: 2+ hours, sync: 24-28 hours)" \
-    "2" "Import from file (faster)" \
+    "2" "Import from file (local export in ~/Downloads)" \
+    "3" "Import from GitHub (download ~22GB from latest release)" \
     3>&1 1>&2 2>&3) || return
   
   case "$choice" in
     1) create_base_vm_from_scratch ;;
     2) import_base_vm ;;
+    3) import_from_github ;;
     *) return ;;
   esac
 }

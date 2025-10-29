@@ -224,14 +224,28 @@ When you first run the script, you can optionally choose **"Configure Defaults"*
 
 #### Step 2: Create Base VM
 
-Choose **"Create Base VM"** from the menu. This will:
+Choose **"Create Base VM"** from the menu. You have three options:
 
+**Option 1: Build from Scratch** (2+ hours compile, 24-28 hours sync)
 1. Download Alpine Linux (tiny, fast VM OS)
 2. **Build Garbageman inside the VM** (typically takes more than 2 hours, depending on your CPU)
 3. Configure Tor and Bitcoin services
 4. Stop the VM and leave it ready to sync
 
-**You'll be prompted for sync resources:**
+**Option 2: Import from File** (for transferring between your own machines)
+1. Select an export archive from `~/Downloads/`
+2. Verify checksum automatically
+3. Import the pre-synced blockchain
+4. Ready in minutes instead of days!
+
+**Option 3: Import from GitHub** (~22GB download, then ready to use)
+1. Fetches available releases from GitHub
+2. Downloads pre-synced VM in parts (~22GB total)
+3. Automatically reassembles and verifies checksum
+4. Imports directly - ready to clone immediately!
+5. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
+
+**After creation, you'll be prompted for sync resources:**
 - The script suggests using most of your available CPU/RAM for faster sync
 - You can accept the defaults or adjust based on what else you're running
 
@@ -484,6 +498,41 @@ Yes! Use the built-in export feature:
      and wait for peers to connect and catch up to current height
 
 The export is fully sanitized and will generate fresh Tor keys on first boot.
+
+**Creating GitHub Releases (for maintainers/contributors):**
+
+If you want to share your synced base VM as a GitHub release:
+
+1. **Export and split the VM:**
+   ```bash
+   # First, export from the main script (Option 3 → export)
+   # Then run the split script:
+   ./devtools/split-export-for-github.sh
+   ```
+   - Select the export you want to split
+   - Script creates parts <2GB each (GitHub's limit)
+   - Generates checksums and a MANIFEST.txt
+
+2. **Create a release tag:**
+   ```bash
+   git tag -a v1.0.0 -m "Release v1.0.0 - Block height 921000"
+   git push origin v1.0.0
+   ```
+
+3. **Upload to GitHub:**
+   - Go to https://github.com/paulscode/garbageman-vmm/releases
+   - Click "Draft a new release"
+   - Select your tag
+   - Upload all files from the split directory:
+     - All `.part*` files
+     - `gm-base-export.tar.gz.sha256`
+     - `MANIFEST.txt`
+   - Add release notes with blockchain height and date
+   - Publish!
+
+4. **Users can then import via:**
+   - Option 1: Create Base VM → Import from GitHub
+   - Script downloads all parts, reassembles, verifies, and imports automatically
 
 **Manual method (advanced):**
 - Export: `virsh dumpxml gm-base > gm-base.xml`
