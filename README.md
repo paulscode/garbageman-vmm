@@ -20,6 +20,7 @@ This script makes it **dead simple** to:
 - ✅ Monitor the Initial Block Download (IBD) sync with a live progress display
 - ✅ Clone your synced node multiple times for redundancy
 - ✅ Each clone gets its own unique Tor `.onion` address (privacy-first!)
+- ✅ Export and transfer VMs securely between systems (all sensitive data removed)
 - ✅ Automatically manage resources so your desktop stays responsive
 
 **No manual configuration needed** - the script handles everything from building the software to setting up Tor networking.
@@ -331,10 +332,12 @@ Choose **"Create Clone VMs (gm-clone-*)"** from the menu:
 - **On completion:** Automatically shuts down VM and resizes to runtime resources
 
 #### Option 3: Manage Base VM
-- **When to use:** Simple start/stop/status controls for the base VM
-- **What it does:** Power on/off the base VM, check status
+- **When to use:** Simple start/stop/status controls for the base VM, or to export for transfer
+- **What it does:** Power on/off the base VM, check status, or create a sanitized export
 - **Shows when running:** Tor .onion address and current block height
-- **Time:** Instant
+- **Export feature:** Creates a secure, portable export (removes all sensitive data: Tor keys, SSH keys, peer databases, logs)
+- **Export format:** Compressed tar.gz archive (~10-15 GB) with SHA256 checksum, saved to ~/Downloads
+- **Time:** Instant for start/stop/status; 10-30 minutes for export
 
 #### Option 4: Create Clone VMs (gm-clone-*)
 - **When to use:** After base VM is fully synced
@@ -443,7 +446,7 @@ Capacity: 6 VMs simultaneously (1 base + 5 clones)
 ### Should I use "Monitor Base VM Sync" or "Manage Base VM"?
 
 - **Monitor Base VM Sync (Option 2):** Use this when you want to watch the blockchain sync progress with a live updating display. Best for initial sync or checking sync status.
-- **Manage Base VM (Option 3):** Use this for simple start/stop/status controls. Shows .onion address and current block height when running. Good for daily management.
+- **Manage Base VM (Option 3):** Use this for simple start/stop/status controls, or to export the VM for transfer to another system. Shows .onion address and current block height when running. Good for daily management and creating portable backups.
 
 Both can start the VM, but Option 2 provides detailed monitoring while Option 3 is quicker for basic operations.
 
@@ -456,10 +459,30 @@ Both can start the VM, but Option 2 provides detailed monitoring while Option 3 
 
 ### Can I run the VMs on a different computer?
 
-Yes! The VMs are standard libvirt/qcow2 format. You can:
-1. Export: `virsh dumpxml gm-base > gm-base.xml`
-2. Copy disk: `/var/lib/libvirt/images/gm-base.qcow2`
-3. Import on another machine
+Yes! Use the built-in export feature:
+
+1. **Export from source machine:**
+   - Choose **Option 3: Manage Base VM** → **"export"**
+   - Creates sanitized archive in `~/Downloads/gm-base-export-YYYYMMDD-HHMMSS.tar.gz`
+   - All sensitive data removed (Tor keys, SSH keys, peer databases, logs)
+   - Includes SHA256 checksum for integrity verification
+
+2. **Transfer to destination machine:**
+   - Copy both `.tar.gz` and `.tar.gz.sha256` files
+   - Verify integrity: `sha256sum -c gm-base-export-*.tar.gz.sha256`
+
+3. **Import on destination machine:**
+   - Extract: `tar -xzf gm-base-export-*.tar.gz`
+   - Move disk: `sudo mv gm-base-export-*/gm-base.qcow2 /var/lib/libvirt/images/`
+   - Import with virt-install or use the import feature (coming soon)
+
+The export is fully sanitized and will generate fresh Tor keys on first boot.
+
+**Manual method (advanced):**
+- Export: `virsh dumpxml gm-base > gm-base.xml`
+- Copy disk: `/var/lib/libvirt/images/gm-base.qcow2`
+- Import on another machine
+- ⚠️ Warning: Manual method does NOT sanitize sensitive data!
 
 ### What if I run out of resources?
 
@@ -476,7 +499,7 @@ If you need more capacity:
 ### How do I view a VM's .onion address?
 
 **Easy way:** Use the menu options:
-- **Option 3: Manage Base VM** - Shows .onion address when the base VM is running
+- **Option 3: Manage Base VM** - Shows .onion address when the base VM is running (also supports exporting)
 - **Option 5: Manage Clone VMs** - Shows .onion address when you select a running clone
 
 **Manual way:**

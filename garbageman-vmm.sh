@@ -3289,16 +3289,17 @@ show_onion(){
 # Quick VM Controls (Action 3)
 ################################################################################
 
-# quick_control: Simple start/stop/status menu for base VM
-# Purpose: Convenient VM power management without full monitoring
+# quick_control: Simple start/stop/status/export menu for base VM
+# Purpose: Convenient VM power management and export without full monitoring
 # Features:
 #   - Displays VM state in menu header
 #   - If VM is running, shows .onion address and block height (like clone management)
-#   - Provides start/stop/state actions
+#   - Provides start/stop/state/export actions
 # Actions:
 #   - start: Power on the VM (virsh start)
 #   - stop: Graceful shutdown (virsh shutdown)
 #   - state: Display current VM state and IP address
+#   - export: Create sanitized, portable export for transfer to another system
 #   - back: Return to main menu
 # Loop: Menu stays open after actions (user must select "back" to exit)
 quick_control(){
@@ -3389,7 +3390,7 @@ quick_control(){
 # Menu Options:
 #   1. Create Base VM - Build and configure initial VM (runs once)
 #   2. Monitor Base VM Sync - Start VM and monitor IBD progress
-#   3. Manage Base VM - Simple start/stop/status controls
+#   3. Manage Base VM - Simple start/stop/status/export controls
 #   4. Create Clone VMs - Create additional Tor-only nodes
 #   5. Manage Clone VMs - Start, stop, or delete clone VMs
 #   6. Capacity Suggestions - Show host-aware resource recommendations
@@ -3421,7 +3422,7 @@ Base VM exists: ${base_exists}"
     case "$choice" in
       1) create_base_vm ;;         # Action 1: Build Alpine VM, compile Garbageman inside, configure services
       2) monitor_sync ;;           # Action 2: Configure resources, start VM, monitor IBD progress
-      3) quick_control ;;          # Action 3: Simple start/stop/status controls
+      3) quick_control ;;          # Action 3: Simple start/stop/status/export controls
       4) clone_menu ;;             # Action 4: Create Tor-only clones from synced base
       5) clone_management_menu ;;  # Action 5: Manage existing clones (start/stop/delete)
       6) show_capacity_suggestions ;;  # Action 6: Show host-aware resource calculations
