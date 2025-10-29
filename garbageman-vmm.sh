@@ -2282,18 +2282,62 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
   echo "=========================================="
   echo ""
   
+  # Track if we've detected a stale tip and are waiting for catch-up
+  local stale_tip_detected=false
+  local stale_tip_wait_start=0
+  local stale_tip_initial_blocks=0
+  
   while true; do
     local info netinfo
     info="$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' || true)"
     netinfo="$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null' || true)"
     
-    local blocks headers vp ibd pct peers
+    local blocks headers vp ibd pct peers time_block
     blocks="$(jq -r '.blocks // 0' <<<"$info" 2>/dev/null || echo 0)"
     headers="$(jq -r '.headers // 0' <<<"$info" 2>/dev/null || echo 0)"
     vp="$(jq -r '.verificationprogress // 0' <<<"$info" 2>/dev/null || echo 0)"
     ibd="$(jq -r '.initialblockdownload // true' <<<"$info" 2>/dev/null || echo true)"
     peers="$(jq -r '.connections // 0' <<<"$netinfo" 2>/dev/null || echo 0)"
+    time_block="$(jq -r '.time // 0' <<<"$info" 2>/dev/null || echo 0)"
     pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
+
+    # Check if the last block is stale (more than 2 hours old)
+    local current_time=$(date +%s)
+    local block_age_seconds=$((current_time - time_block))
+    local block_age_hours=$((block_age_seconds / 3600))
+    local is_stale=false
+    
+    # Consider tip stale if block is more than 2 hours old and we have blocks > 0
+    if [[ "$blocks" -gt 0 && "$time_block" -gt 0 && "$block_age_seconds" -gt 7200 ]]; then
+      is_stale=true
+    fi
+    
+    # Handle stale tip detection and waiting logic
+    local sync_status_msg=""
+    if [[ "$is_stale" == "true" && "$stale_tip_detected" == "false" ]]; then
+      # Just detected stale tip - start waiting period
+      stale_tip_detected=true
+      stale_tip_wait_start=$current_time
+      stale_tip_initial_blocks=$blocks
+      sync_status_msg="Stale tip detected (${block_age_hours}h old). Waiting for peers to sync..."
+    elif [[ "$stale_tip_detected" == "true" ]]; then
+      # We're in a waiting period for stale tip
+      local wait_elapsed=$((current_time - stale_tip_wait_start))
+      local wait_remaining=$((120 - wait_elapsed))
+      
+      # Check if blocks have increased (catching up)
+      if [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
+        # Blocks are advancing - continue monitoring normally
+        sync_status_msg="Syncing new blocks (was ${block_age_hours}h behind)..."
+      elif [[ "$wait_elapsed" -lt 120 ]]; then
+        # Still waiting for peers and updates (up to 2 minutes)
+        sync_status_msg="Waiting for sync (${wait_remaining}s left, ${peers} peers connected)..."
+      else
+        # Waited 2 minutes and no progress - consider it caught up anyway
+        stale_tip_detected=false
+        sync_status_msg="No new blocks after 2min wait, considering synced"
+      fi
+    fi
 
     detect_host_resources
     
@@ -2316,16 +2360,39 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
     printf "║%-80s║\n" "    IBD:      ${ibd}"
     printf "║%-80s║\n" "    Peers:    ${peers}"
+    if [[ -n "$sync_status_msg" ]]; then
+      printf "║%-80s║\n" "    Status:   ${sync_status_msg}"
+    fi
     printf "║%-80s║\n" ""
     printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
     printf "║%-80s║\n" "  Auto-refreshing every ${POLL_SECS} seconds... Press Ctrl+C to exit"
     printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
     
     # Check if IBD is complete - multiple conditions to catch completion
+    # BUT: Don't complete if we detected a stale tip and are still waiting for catch-up
     # 1. IBD flag is false (bitcoind says it's done)
     # 2. Blocks caught up to headers
     # 3. Progress is at or near 100%
+    # 4. NOT currently waiting for stale tip to catch up
+    local should_complete=false
     if [[ "$ibd" == "false" ]] || [[ "$blocks" -ge "$headers" && "$headers" -gt 0 && "$pct" -ge 99 ]]; then
+      # Basic completion conditions met, but check stale tip status
+      if [[ "$stale_tip_detected" == "false" ]]; then
+        # No stale tip detected or we've finished waiting - OK to complete
+        should_complete=true
+      elif [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
+        # Stale tip was detected but blocks are advancing - wait for them to catch up
+        should_complete=false
+      else
+        # Stale tip detected, waited 2 minutes, no new blocks - consider done
+        local wait_elapsed=$((current_time - stale_tip_wait_start))
+        if [[ "$wait_elapsed" -ge 120 ]]; then
+          should_complete=true
+        fi
+      fi
+    fi
+    
+    if [[ "$should_complete" == "true" ]]; then
       # Clear screen before showing completion message
       clear
       echo ""
