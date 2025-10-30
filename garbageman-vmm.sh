@@ -2302,10 +2302,10 @@ import_from_github(){
 ################################################################################
 
 # create_base_vm: Main entry point for Action 1
-# Purpose: Offers choice between building from scratch or importing
+# Purpose: Offers choice between importing from GitHub, importing from file, or building from scratch
 # Flow:
 #   1. Check if VM already exists (abort if it does)
-#   2. Present menu: "Build from scratch" or "Import from file"
+#   2. Present menu: "Import from GitHub", "Import from file", or "Build from scratch"
 #   3. Call appropriate function based on selection
 create_base_vm(){
   # Check if VM already exists
@@ -2318,15 +2318,15 @@ create_base_vm(){
   local choice
   choice=$(whiptail --title "Create Base VM" \
     --menu "How would you like to create the base VM?\n" 18 78 3 \
-    "1" "Build from scratch (compile: 2+ hours, sync: 24-28 hours)" \
+    "1" "Import from GitHub (download ~22GB from latest release)" \
     "2" "Import from file (local export in ~/Downloads)" \
-    "3" "Import from GitHub (download ~22GB from latest release)" \
+    "3" "Build from scratch (compile: 2+ hours, sync: 24-28 hours)" \
     3>&1 1>&2 2>&3) || return
   
   case "$choice" in
-    1) create_base_vm_from_scratch ;;
+    1) import_from_github ;;
     2) import_base_vm ;;
-    3) import_from_github ;;
+    3) create_base_vm_from_scratch ;;
     *) return ;;
   esac
 }

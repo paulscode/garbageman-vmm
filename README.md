@@ -226,11 +226,12 @@ When you first run the script, you can optionally choose **"Configure Defaults"*
 
 Choose **"Create Base VM"** from the menu. You have three options:
 
-**Option 1: Build from Scratch** (2+ hours compile, 24-28 hours sync)
-1. Download Alpine Linux (tiny, fast VM OS)
-2. **Build Garbageman inside the VM** (typically takes more than 2 hours, depending on your CPU)
-3. Configure Tor and Bitcoin services
-4. Stop the VM and leave it ready to sync
+**Option 1: Import from GitHub** (~22GB download, then ready to use)
+1. Fetches available releases from GitHub
+2. Downloads pre-synced VM in parts (~22GB total)
+3. Automatically reassembles and verifies checksum
+4. Imports directly - ready to clone immediately!
+5. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
 
 **Option 2: Import from File** (for transferring between your own machines)
 1. Select an export archive from `~/Downloads/`
@@ -238,12 +239,11 @@ Choose **"Create Base VM"** from the menu. You have three options:
 3. Import the pre-synced blockchain
 4. Ready in minutes instead of days!
 
-**Option 3: Import from GitHub** (~22GB download, then ready to use)
-1. Fetches available releases from GitHub
-2. Downloads pre-synced VM in parts (~22GB total)
-3. Automatically reassembles and verifies checksum
-4. Imports directly - ready to clone immediately!
-5. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
+**Option 3: Build from Scratch** (2+ hours compile, 24-28 hours sync)
+1. Download Alpine Linux (tiny, fast VM OS)
+2. **Build Garbageman inside the VM** (typically takes more than 2 hours, depending on your CPU)
+3. Configure Tor and Bitcoin services
+4. Stop the VM and leave it ready to sync
 
 **After creation, you'll be prompted for sync resources:**
 - The script suggests using most of your available CPU/RAM for faster sync
