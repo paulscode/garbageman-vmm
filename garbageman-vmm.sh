@@ -2579,6 +2579,69 @@ stop() {
 # VM Status Monitor
 ################################################################################
 
+# get_peer_breakdown: Analyze peer user agents and categorize them
+# Args: $1 = IP address of VM
+# Returns: Formatted string like "21 (5 LR/GM, 3 KNOTS, 2 OLDCORE, 7 COREv30+, 4 OTHER)"
+# Categories:
+#   LR/GM: Libre Relay or Garbageman (has Libre Relay service bit)
+#   KNOTS: Bitcoin Knots (any version)
+#   OLDCORE: Bitcoin Core < v30
+#   COREv30+: Bitcoin Core >= v30
+#   OTHER: Everything else
+get_peer_breakdown(){
+  local ip="$1"
+  local peerinfo
+  
+  # Get detailed peer information
+  peerinfo=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getpeerinfo 2>/dev/null' 2>/dev/null || echo "[]")
+  
+  # Count total peers
+  local total=$(jq 'length' <<<"$peerinfo" 2>/dev/null || echo 0)
+  
+  if [[ "$total" -eq 0 ]]; then
+    echo "0"
+    return
+  fi
+  
+  # Initialize counters
+  local lr_gm=0 knots=0 oldcore=0 core30plus=0 other=0
+  
+  # Parse each peer's user agent and services
+  while IFS= read -r peer; do
+    local subver=$(jq -r '.subver // ""' <<<"$peer" 2>/dev/null)
+    local services=$(jq -r '.services // ""' <<<"$peer" 2>/dev/null)
+    
+    # Check for Libre Relay bit (0x0400 = 1024 in decimal)
+    # Services is a hex string like "000000000000040d"
+    if [[ -n "$services" ]]; then
+      local services_dec=$((16#${services}))
+      if (( (services_dec & 0x0400) != 0 )); then
+        ((lr_gm++))
+        continue
+      fi
+    fi
+    
+    # Check user agent string patterns
+    if [[ "$subver" =~ [Kk]nots ]]; then
+      ((knots++))
+    elif [[ "$subver" =~ /Satoshi:([0-9]+)\. ]]; then
+      local version="${BASH_REMATCH[1]}"
+      if [[ "$version" -ge 30 ]]; then
+        ((core30plus++))
+      else
+        ((oldcore++))
+      fi
+    else
+      ((other++))
+    fi
+  done < <(jq -c '.[]' <<<"$peerinfo" 2>/dev/null)
+  
+  # Build the breakdown string - always show all categories
+  local breakdown="$total ($lr_gm LR/GM, $knots KNOTS, $oldcore OLDCORE, $core30plus COREv30+, $other OTHER)"
+  
+  echo "$breakdown"
+}
+
 # monitor_vm_status: Live monitoring display for any VM
 # Purpose: Show real-time status with auto-refresh (like IBD monitor but simpler)
 # Args: $1 = VM name to monitor
@@ -2619,6 +2682,9 @@ monitor_vm_status(){
         # Get network info
         netinfo=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null' 2>/dev/null || echo "")
         peers=$(jq -r '.connections // "?"' <<<"$netinfo" 2>/dev/null || echo "?")
+        
+        # Get detailed peer breakdown
+        local peer_breakdown=$(get_peer_breakdown "$ip")
         
         # Calculate percentage
         local pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
@@ -2663,7 +2729,7 @@ monitor_vm_status(){
       printf "║%-80s║\n" "  Bitcoin Status:"
       printf "║%-80s║\n" "    Blocks:   $blocks / $headers"
       printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
-      printf "║%-80s║\n" "    Peers:    $peers"
+      printf "║%-80s║\n" "    Peers:    $peer_breakdown"
       printf "║%-80s║\n" ""
     elif [[ "$state" == "running" ]]; then
       printf "║%-80s║\n" "  Network Status:"
@@ -3002,6 +3068,9 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     peers="$(jq -r '.connections // 0' <<<"$netinfo" 2>/dev/null || echo 0)"
     time_block="$(jq -r '.time // 0' <<<"$info" 2>/dev/null || echo 0)"
     pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
+    
+    # Get detailed peer breakdown
+    local peer_breakdown=$(get_peer_breakdown "$ip")
 
     # Check if the last block is stale (more than 2 hours old)
     local current_time=$(date +%s)
@@ -3075,7 +3144,7 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     printf "║%-80s║\n" "    Blocks:   ${blocks} / ${headers}"
     printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
     printf "║%-80s║\n" "    IBD:      ${ibd}"
-    printf "║%-80s║\n" "    Peers:    ${peers}"
+    printf "║%-80s║\n" "    Peers:    ${peer_breakdown}"
     if [[ -n "$sync_status_msg" ]]; then
       printf "║%-80s║\n" "    Status:   ${sync_status_msg}"
     fi
