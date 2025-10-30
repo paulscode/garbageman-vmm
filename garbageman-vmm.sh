@@ -2576,6 +2576,122 @@ stop() {
 
 
 ################################################################################
+# VM Status Monitor
+################################################################################
+
+# monitor_vm_status: Live monitoring display for any VM
+# Purpose: Show real-time status with auto-refresh (like IBD monitor but simpler)
+# Args: $1 = VM name to monitor
+# Display: Auto-refreshing every 5 seconds, exit with Ctrl+C
+# Shows: State, IP, .onion address, blocks/headers, peers, resources
+monitor_vm_status(){
+  local vm_name="$1"
+  
+  echo ""
+  echo "=========================================="
+  echo "Monitoring VM: $vm_name"
+  echo "Press 'q' to return to menu"
+  echo "=========================================="
+  echo ""
+  
+  while true; do
+    local state ip onion blocks headers peers ibd vp
+    local info netinfo
+    
+    # Get VM state
+    state=$(vm_state "$vm_name" 2>/dev/null || echo "unknown")
+    
+    # If running, get network info
+    if [[ "$state" == "running" ]]; then
+      ip=$(vm_ip "$vm_name" 2>/dev/null || echo "")
+      
+      if [[ -n "$ip" ]]; then
+        # Get .onion address
+        onion=$(gssh "$ip" 'cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null' 2>/dev/null || echo "unknown")
+        
+        # Get blockchain info
+        info=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' 2>/dev/null || echo "")
+        blocks=$(jq -r '.blocks // "?"' <<<"$info" 2>/dev/null || echo "?")
+        headers=$(jq -r '.headers // "?"' <<<"$info" 2>/dev/null || echo "?")
+        vp=$(jq -r '.verificationprogress // 0' <<<"$info" 2>/dev/null || echo "0")
+        ibd=$(jq -r '.initialblockdownload // "?"' <<<"$info" 2>/dev/null || echo "?")
+        
+        # Get network info
+        netinfo=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null' 2>/dev/null || echo "")
+        peers=$(jq -r '.connections // "?"' <<<"$netinfo" 2>/dev/null || echo "?")
+        
+        # Calculate percentage
+        local pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
+      fi
+    fi
+    
+    # Get VM resource allocation
+    local vm_vcpus vm_ram_mb
+    if sudo virsh dominfo "$vm_name" >/dev/null 2>&1; then
+      vm_vcpus=$(sudo virsh dominfo "$vm_name" 2>/dev/null | grep -i "CPU(s)" | awk '{print $2}' || echo "?")
+      local ram_kib=$(sudo virsh dominfo "$vm_name" 2>/dev/null | grep -i "Max memory" | awk '{print $3}' || echo "0")
+      vm_ram_mb=$((ram_kib / 1024))
+    else
+      vm_vcpus="?"
+      vm_ram_mb="?"
+    fi
+    
+    detect_host_resources
+    
+    # Clear screen and display
+    clear
+    printf "╔════════════════════════════════════════════════════════════════════════════════╗\n"
+    printf "║%-80s║\n" "                        VM Status Monitor - $vm_name"
+    printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  Host Resources:"
+    printf "║%-80s║\n" "    Cores: ${HOST_CORES} total | ${RESERVE_CORES} reserved | ${AVAIL_CORES} available"
+    printf "║%-80s║\n" "    RAM:   ${HOST_RAM_MB} MiB total | ${RESERVE_RAM_MB} MiB reserved | ${AVAIL_RAM_MB} MiB available"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  VM Configuration:"
+    printf "║%-80s║\n" "    Name:   $vm_name"
+    printf "║%-80s║\n" "    State:  $state"
+    printf "║%-80s║\n" "    vCPUs:  $vm_vcpus"
+    printf "║%-80s║\n" "    RAM:    ${vm_ram_mb} MiB"
+    printf "║%-80s║\n" ""
+    
+    if [[ "$state" == "running" && -n "$ip" ]]; then
+      printf "║%-80s║\n" "  Network Status:"
+      printf "║%-80s║\n" "    IP:     $ip"
+      printf "║%-80s║\n" "    Tor:    $onion"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Bitcoin Status:"
+      printf "║%-80s║\n" "    Blocks:   $blocks / $headers"
+      printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
+      printf "║%-80s║\n" "    Peers:    $peers"
+      printf "║%-80s║\n" ""
+    elif [[ "$state" == "running" ]]; then
+      printf "║%-80s║\n" "  Network Status:"
+      printf "║%-80s║\n" "    Waiting for network connection..."
+      printf "║%-80s║\n" ""
+    else
+      printf "║%-80s║\n" "  VM is not running"
+      printf "║%-80s║\n" ""
+    fi
+    
+    printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+    printf "║%-80s║\n" "  Auto-refreshing every 5 seconds... Press 'q' to exit"
+    printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
+    
+    # Use read with timeout - check if user pressed 'q'
+    read -t 5 -n 1 key 2>/dev/null || true
+    if [[ "$key" == "q" || "$key" == "Q" ]]; then
+      clear
+      echo ""
+      echo "Monitor stopped."
+      sleep 1
+      return
+    fi
+  done
+}
+
+
+################################################################################
 # Resize Base VM (after IBD completes)
 ################################################################################
 
@@ -2860,14 +2976,11 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
   echo ""
   fi  # End of else block (shut off VM path)
 
-  # Set up trap to handle Ctrl+C and clean up background processes
-  trap 'echo ""; echo "Monitor interrupted. VM is still running."; return' INT
-
   # Use a simple watch-style display instead of whiptail for auto-refresh
   echo ""
   echo "=========================================="
   echo "Monitoring IBD Progress"
-  echo "Press Ctrl+C to exit (VM will keep running)"
+  echo "Press 'q' to exit (VM will keep running)"
   echo "=========================================="
   echo ""
   
@@ -2968,7 +3081,7 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     fi
     printf "║%-80s║\n" ""
     printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
-    printf "║%-80s║\n" "  Auto-refreshing every ${POLL_SECS} seconds... Press Ctrl+C to exit"
+    printf "║%-80s║\n" "  Auto-refreshing every ${POLL_SECS} seconds... Press 'q' to exit"
     printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
     
     # Check if IBD is complete - multiple conditions to catch completion
@@ -3094,7 +3207,15 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
       return
     fi
     
-    sleep "$POLL_SECS"
+    # Use read with timeout - check if user pressed 'q' to exit early
+    read -t "$POLL_SECS" -n 1 key 2>/dev/null || true
+    if [[ "$key" == "q" || "$key" == "Q" ]]; then
+      clear
+      echo ""
+      echo "Monitor stopped. VM is still running."
+      sleep 1
+      return
+    fi
   done
   
   return
@@ -3760,16 +3881,7 @@ manage_clone(){
         fi
         ;;
       4)
-        current_state=$(vm_state "$clone_name" 2>/dev/null || echo "unknown")
-        local info="State: ${current_state}"
-        
-        if [[ "$current_state" == "running" ]]; then
-          local ip
-          ip=$(vm_ip "$clone_name" 2>/dev/null || echo "unknown")
-          info="${info}\nIP: ${ip}"
-        fi
-        
-        pause "$info"
+        monitor_vm_status "$clone_name"
         ;;
       5)
         if whiptail --title "Confirm Deletion" --yesno \
@@ -3964,16 +4076,7 @@ quick_control(){
         pause "Shutdown command sent to VM '${VM_NAME}'."
         ;;
       state) 
-        current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
-        local info="State: ${current_state}"
-        
-        if [[ "$current_state" == "running" ]]; then
-          local ip
-          ip=$(vm_ip "$VM_NAME" 2>/dev/null || echo "unknown")
-          info="${info}\nIP: ${ip}"
-        fi
-        
-        pause "$info"
+        monitor_vm_status "$VM_NAME"
         ;;
       export)
         export_base_vm
