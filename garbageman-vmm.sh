@@ -2983,18 +2983,15 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
       if [[ "$stale_tip_detected" == "false" ]]; then
         # No stale tip detected or we've finished waiting - OK to complete
         should_complete=true
-      elif [[ "$blocks" -ge "$headers" && "$pct" -ge 99 ]]; then
-        # Stale tip was detected, but blocks caught up to headers - consider complete
+      elif [[ "$blocks" -ge "$headers" && "$pct" -ge 99 && "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
+        # Stale tip was detected AND blocks have advanced past initial AND caught up to headers - complete
         should_complete=true
       elif [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
         # Stale tip was detected and blocks are still advancing - keep waiting
         should_complete=false
       else
-        # Stale tip detected, waited 2 minutes, no new blocks - consider done
-        local wait_elapsed=$((current_time - stale_tip_wait_start))
-        if [[ "$wait_elapsed" -ge 120 ]]; then
-          should_complete=true
-        fi
+        # Stale tip detected, no progress yet - keep waiting (no timeout)
+        should_complete=false
       fi
     fi
     
