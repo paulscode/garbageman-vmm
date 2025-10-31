@@ -109,6 +109,18 @@ die(){
   exit 1
 }
 
+# need_sudo_for_virsh: Check if we need sudo for virsh operations
+# Returns: 0 (true) if sudo is needed, 1 (false) if current user is in libvirt group
+# Purpose: Determines whether to use sudo for virt-* commands
+# Note: virsh_cmd always uses sudo for consistency
+need_sudo_for_virsh(){
+  # Check if user is in libvirt group and can access /var/run/libvirt/libvirt-sock
+  if groups | grep -qw libvirt && [ -w /var/run/libvirt/libvirt-sock ] 2>/dev/null; then
+    return 1  # Don't need sudo
+  fi
+  return 0  # Need sudo
+}
+
 # virsh_cmd: Wrapper for virsh commands that always uses sudo and system instance
 # Args: $@ = virsh command and arguments
 # Example: virsh_cmd list --all
@@ -266,7 +278,12 @@ install_deps() {
   local current_user="${SUDO_USER:-$USER}"
   sudo usermod -a -G libvirt "$current_user"
   echo "Added user '$current_user' to libvirt group."
-  echo "Note: You may need to log out and back in for group membership to take effect."
+  echo ""
+  echo "Important: Group membership changes require one of the following:"
+  echo "  1. Log out and log back in (recommended for permanent effect)"
+  echo "  2. Run this script with: sg libvirt -c './garbageman-vmm.sh'"
+  echo "  3. Continue with this session (will use sudo for privileged operations)"
+  echo ""
   
   # Ensure default network is started (required for VM networking)
   ensure_default_network || true
@@ -315,7 +332,19 @@ EOF
   net_list_output=$(virsh_cmd net-list --all 2>/dev/null || true)
   if ! echo "$net_list_output" | grep -q "default.*active"; then
     echo "Starting libvirt default network..."
-    virsh_cmd net-start default 2>/dev/null || true
+    if ! virsh_cmd net-start default 2>&1 | grep -v "already active" | grep -v "^$"; then
+      echo "Warning: May have failed to start default network" >&2
+    fi
+    # Give network a moment to initialize
+    sleep 2
+  fi
+  
+  # Verify network is actually active
+  net_list_output=$(virsh_cmd net-list --all 2>/dev/null || true)
+  if ! echo "$net_list_output" | grep -q "default.*active"; then
+    echo "❌ Warning: libvirt default network is not active" >&2
+    echo "VM networking may fail. Try: sudo virsh net-start default" >&2
+    return 1
   fi
   
   return 0
@@ -3020,9 +3049,13 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
   # Inject a temporary SSH key & ensure sshd starts
   ensure_monitor_ssh
   
+  # Ensure libvirt default network is active (critical for VM networking)
+  echo "Ensuring libvirt default network is active..."
+  ensure_default_network || die "Failed to start libvirt default network. VM will not have network connectivity."
+  
   echo "=========================================="
   echo "Starting VM and waiting for network..."
-  echo "This will take up to ${HOST_WAIT_SSH} seconds."
+  echo "This may take a few minutes."
   echo "=========================================="
   echo ""
   sudo virsh start "$VM_NAME" >/dev/null || true
