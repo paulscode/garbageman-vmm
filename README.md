@@ -1,6 +1,6 @@
 # Garbageman VM Manager
 
-**Easy setup for running multiple Bitcoin Garbageman nodes on Linux Mint 22.2**
+**Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes on Linux Mint 22.2**
 
 Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle, each with its own Tor hidden service for maximum privacy.
 
@@ -14,7 +14,7 @@ Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle,
 
 ## 🎯 What This Does
 
-This script makes it **dead simple** to:
+This script makes it **dead simple** (in theory) to:
 
 - ✅ Create a lightweight Bitcoin Garbageman node in a virtual machine (VM)
 - ✅ Monitor the Initial Block Download (IBD) sync with a live progress display
