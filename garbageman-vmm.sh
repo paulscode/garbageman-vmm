@@ -362,6 +362,41 @@ ensure_tools(){
   ensure_default_network || true
 }
 
+# check_libvirt_access: Verify libvirt is accessible before attempting VM operations
+# Purpose: Catches permission issues early with helpful error messages
+# Returns: 0 if libvirt is accessible, dies with helpful message if not
+check_libvirt_access(){
+  # Check if libvirtd is running
+  if ! sudo systemctl is-active --quiet libvirtd; then
+    echo "❌ libvirtd service is not running"
+    echo ""
+    echo "Attempting to start libvirtd..."
+    if sudo systemctl start libvirtd; then
+      echo "✓ libvirtd started successfully"
+      sleep 2
+    else
+      die "Failed to start libvirtd service.\n\nTry: sudo systemctl start libvirtd"
+    fi
+  fi
+  
+  # Check if we can connect to libvirt
+  if ! sudo virsh -c qemu:///system version >/dev/null 2>&1; then
+    die "Cannot connect to libvirt.\n\nTroubleshooting:\n1. Check if libvirtd is running: sudo systemctl status libvirtd\n2. Check for errors: sudo journalctl -u libvirtd -n 50"
+  fi
+  
+  # Verify default network exists and is active
+  if ! ensure_default_network; then
+    echo "⚠ Warning: Default network may not be properly configured"
+    echo "   Attempting to fix..."
+    sleep 2
+    # Try one more time
+    if ! ensure_default_network; then
+      die "Failed to activate libvirt default network.\n\nTry manually:\n  sudo virsh net-start default\n\nIf that fails, check: sudo journalctl -u libvirtd -n 50"
+    fi
+  fi
+  
+  return 0
+}
 
 ################################################################################
 # Host Resource Detection & Capacity Suggestions
@@ -1791,6 +1826,9 @@ import_base_vm(){
   sudo_keepalive_start force
   
   ensure_tools
+  
+  # Verify libvirt is accessible before proceeding
+  check_libvirt_access
 
   # Scan for export archives in ~/Downloads
   echo "Scanning ~/Downloads for export archives..."
@@ -2019,14 +2057,23 @@ import_base_vm(){
   # Create VM domain definition
   echo ""
   echo "    Creating VM domain..."
-  sudo virt-install \
+  
+  # Use explicit connection and better error handling for virt-install
+  if ! sudo virt-install \
+    --connect qemu:///system \
     --name "$VM_NAME" \
     --memory "$SYNC_RAM_MB" --vcpus "$SYNC_VCPUS" --cpu host \
     --disk "path=$dest_disk,format=qcow2,bus=virtio" \
     --network "network=default,model=virtio" \
     --osinfo alpinelinux3.18 \
     --graphics none --noautoconsole \
-    --import >/dev/null 2>&1
+    --import 2>&1; then
+    echo ""
+    echo "    ✗ VM creation failed"
+    echo ""
+    rm -rf "$temp_extract_dir" 2>/dev/null || true
+    die "Failed to create VM domain. Check that libvirtd is running and default network is active."
+  fi
   
   # virt-install --import automatically starts the VM, but we want it stopped
   echo "    Stopping VM..."
@@ -2379,6 +2426,9 @@ create_base_vm_from_scratch(){
   sudo_keepalive_start force
 
   ensure_tools
+  
+  # Verify libvirt is accessible before proceeding (catches permission issues early)
+  check_libvirt_access
 
   # Let user configure/edit defaults & clearnet toggle; show confirmation.
   if ! configure_defaults_direct; then
@@ -2572,14 +2622,31 @@ stop() {
 
   # Create VM domain definition using the prebuilt image
   echo "Creating VM domain with prebuilt image..."
-  sudo virt-install \
+  echo ""
+  
+  # Use sudo and explicit connection for virt-install to avoid permission issues
+  # --import starts the VM immediately, --noautoconsole prevents dropping to console
+  # Always use qemu:///system to ensure we're working with the system libvirt instance
+  if ! sudo virt-install \
+    --connect qemu:///system \
     --name "$VM_NAME" \
     --memory "$SYNC_RAM_MB" --vcpus "$SYNC_VCPUS" --cpu host \
     --disk "path=$disk,format=qcow2,bus=virtio" \
     --network "network=default,model=virtio" \
     --osinfo alpinelinux3.18 \
     --graphics none --noautoconsole \
-    --import
+    --import 2>&1; then
+    echo ""
+    echo "❌ VM creation failed!"
+    echo ""
+    echo "Troubleshooting steps:"
+    echo "1. Check if libvirtd is running: sudo systemctl status libvirtd"
+    echo "2. Check if default network is active: sudo virsh net-list --all"
+    echo "3. Try restarting libvirtd: sudo systemctl restart libvirtd"
+    echo "4. If you just installed packages, you may need to log out and back in"
+    echo "   Alternatively, run: sg libvirt -c './garbageman-vmm.sh'"
+    die "Failed to create VM domain with virt-install. See troubleshooting above."
+  fi
 
   # virt-install --import automatically starts the VM, but we want it stopped
   # so the user can start it fresh with monitoring when they choose Action 2
