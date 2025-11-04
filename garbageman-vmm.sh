@@ -8257,6 +8257,12 @@ import_base_container(){
     return
   fi
   
+  # Prompt for initial sync resources
+  if ! prompt_sync_resources_container; then
+    pause "Cancelled."
+    return
+  fi
+  
   echo "Scanning ~/Downloads for container exports..."
   local archives=()
   local export_items=()
@@ -8506,8 +8512,10 @@ import_base_container(){
   
   if ! container_cmd create \
     --name "$CONTAINER_NAME" \
-    --cpus="${VM_VCPUS}.0" \
-    --memory="${VM_RAM_MB}m" \
+    --network host \
+    --cpus="$SYNC_VCPUS" \
+    --memory="${SYNC_RAM_MB}m" \
+    --memory-swap="${SYNC_RAM_MB}m" \
     -v garbageman-data:/var/lib/bitcoin \
     --restart unless-stopped \
     "$CONTAINER_IMAGE"; then
@@ -8570,8 +8578,10 @@ torcontrol=127.0.0.1:9051
     container_cmd rm "$CONTAINER_NAME" >/dev/null 2>&1
     if ! container_cmd create \
       --name "$CONTAINER_NAME" \
-      --cpus="${VM_VCPUS}.0" \
-      --memory="${VM_RAM_MB}m" \
+      --network host \
+      --cpus="$SYNC_VCPUS" \
+      --memory="${SYNC_RAM_MB}m" \
+      --memory-swap="${SYNC_RAM_MB}m" \
       -v garbageman-data:/var/lib/bitcoin \
       --restart unless-stopped \
       "$CONTAINER_IMAGE" \
@@ -8580,8 +8590,10 @@ torcontrol=127.0.0.1:9051
       echo "    ⚠️  Failed to override config, using default from image"
       container_cmd create \
         --name "$CONTAINER_NAME" \
-        --cpus="${VM_VCPUS}.0" \
-        --memory="${VM_RAM_MB}m" \
+        --network host \
+        --cpus="$SYNC_VCPUS" \
+        --memory="${SYNC_RAM_MB}m" \
+        --memory-swap="${SYNC_RAM_MB}m" \
         -v garbageman-data:/var/lib/bitcoin \
         --restart unless-stopped \
         "$CONTAINER_IMAGE" >/dev/null 2>&1
@@ -8644,12 +8656,6 @@ import_from_github_container(){
     rm -f "$dir"/blockchain.tar.gz "$dir"/gm-blockchain.tar.gz 2>/dev/null
     rm -rf "$dir/blockchain-data" "$dir/container-image" 2>/dev/null
   }
-  
-  # Let user configure defaults for resource allocation
-  if ! configure_defaults_container; then
-    pause "Cancelled."
-    return
-  fi
   
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
@@ -8818,6 +8824,22 @@ import_from_github_container(){
     echo "  Total: $total_size"
   fi
   echo ""
+  
+  # Configure resources before downloading
+  echo "Before downloading, let's configure resource allocation:"
+  echo ""
+  
+  # Let user configure defaults for resource allocation
+  if ! configure_defaults_container; then
+    pause "Cancelled."
+    return
+  fi
+  
+  # Prompt for initial sync resources
+  if ! prompt_sync_resources_container; then
+    pause "Cancelled."
+    return
+  fi
   
   local download_message="This will download approximately $total_size of data.\n\nBlockchain parts: ${#blockchain_part_urls[@]}\nContainer image: $container_image_name"
   if [[ -n "$vm_image_url" ]]; then
@@ -9289,8 +9311,9 @@ torcontrol=127.0.0.1:9051
       --name "$CONTAINER_NAME" \
       --network host \
       -v garbageman-data:/var/lib/bitcoin \
-      --memory="${CONTAINER_RUNTIME_RAM}m" \
-      --cpus="$CONTAINER_RUNTIME_CPUS" \
+      --memory="${SYNC_RAM_MB}m" \
+      --memory-swap="${SYNC_RAM_MB}m" \
+      --cpus="$SYNC_VCPUS" \
       "$image_name" \
       bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin || {
       # Fallback: create without custom command
@@ -9299,8 +9322,9 @@ torcontrol=127.0.0.1:9051
         --name "$CONTAINER_NAME" \
         --network host \
         -v garbageman-data:/var/lib/bitcoin \
-        --memory="${CONTAINER_RUNTIME_RAM}m" \
-        --cpus="$CONTAINER_RUNTIME_CPUS" \
+        --memory="${SYNC_RAM_MB}m" \
+        --memory-swap="${SYNC_RAM_MB}m" \
+        --cpus="$SYNC_VCPUS" \
         "$image_name" || {
         rm -f "$temp_conf"
         pause "❌ Failed to create base container"
@@ -9314,8 +9338,9 @@ torcontrol=127.0.0.1:9051
       --name "$CONTAINER_NAME" \
       --network host \
       -v garbageman-data:/var/lib/bitcoin \
-      --memory="${CONTAINER_RUNTIME_RAM}m" \
-      --cpus="$CONTAINER_RUNTIME_CPUS" \
+      --memory="${SYNC_RAM_MB}m" \
+      --memory-swap="${SYNC_RAM_MB}m" \
+      --cpus="$SYNC_VCPUS" \
       "$image_name" || {
       rm -f "$temp_conf"
       pause "❌ Failed to create base container"
