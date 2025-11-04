@@ -172,15 +172,15 @@ These settings are **critical** for acceptable performance, and can be edited in
 **Processor Tab:**
 - ✅ **Enable PAE/NX:** Required for 64-bit Linux
 - **Nested VT-x/AMD-V:** 
-  - **VM mode:** ✅ **Enable** - Required for nested virtualization (VMs inside a VM)
-  - **Container mode:** ❌ **Disable** - Reduced overhead
-  - Set **Processor(s)** to at least 4 cores (8+ recommended)
-- Set **Execution Cap** to 100% (ensure VM isn't throttled)
+  - **(for VM mode):** ✅ **Enable** - Required for nested virtualization (VMs inside a VM)
+  - **(for Container mode):** ❌ **Disable** - Reduced overhead
+- Set **Processor(s)** to at least 4 cores (8+ recommended)
+- Set **Processing Cap** to 100% (ensure VM isn't throttled)
 
 **Acceleration Tab:**
 - **Paravirtualization Interface:**
-  - **VM mode:** Set to **KVM** (best performance for nested virtualization)
-  - **Container mode:** Set to **Default** (may have better compatibility)
+  - **(for VM mode):** Set to **KVM** (best performance for nested virtualization)
+  - **(for Container mode):** Set to **Default** (may have better compatibility)
 
 #### 2. Storage Settings (Settings → Storage)
 
