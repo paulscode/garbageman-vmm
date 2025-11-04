@@ -171,12 +171,16 @@ These settings are **critical** for acceptable performance, and can be edited in
 
 **Processor Tab:**
 - ✅ **Enable PAE/NX:** Required for 64-bit Linux
-- ✅ **Enable Nested VT-x/AMD-V:** **IMPORTANT** for VM mode - Enables nested virtualization (VMs inside a VM). Not required for container mode.
-- Set **Processor(s)** to at least 4 cores (8+ recommended)
+- **Nested VT-x/AMD-V:** 
+  - **VM mode:** ✅ **Enable** - Required for nested virtualization (VMs inside a VM)
+  - **Container mode:** ❌ **Disable** - Reduced overhead
+  - Set **Processor(s)** to at least 4 cores (8+ recommended)
 - Set **Execution Cap** to 100% (ensure VM isn't throttled)
 
 **Acceleration Tab:**
-- Set **Paravirtualization Interface** to **KVM** (best performance for Linux guests)
+- **Paravirtualization Interface:**
+  - **VM mode:** Set to **KVM** (best performance for nested virtualization)
+  - **Container mode:** Set to **Default** (may have better compatibility)
 
 #### 2. Storage Settings (Settings → Storage)
 
@@ -209,8 +213,8 @@ These settings are **critical** for acceptable performance, and can be edited in
 
 Before running the script, verify these VirtualBox settings:
 
-- [ ] **Nested VT-x/AMD-V enabled** (System → Processor) - Important for VM mode
-- [ ] **Paravirtualization Interface = KVM** (System → Acceleration)
+- [ ] **Nested VT-x/AMD-V enabled (for VM) or disabled (for container)** (System → Processor)
+- [ ] **Paravirtualization Interface = KVM (for VM) or Default (for container)** (System → Acceleration)
 - [ ] **VirtIO SCSI controller** with Host I/O Cache enabled (Storage)
 - [ ] **virtio-net network adapter** (Network → Advanced)
 - [ ] **I/O APIC enabled** (System → Motherboard)
