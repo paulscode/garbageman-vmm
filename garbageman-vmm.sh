@@ -3225,8 +3225,8 @@ import_from_github(){
     # OLD blockchain checksum
     elif [[ "$name" == "gm-blockchain.tar.gz.sha256" ]]; then
       blockchain_checksum_url="$url"
-    # NEW VM image naming (vm-image-*)
-    elif [[ "$name" =~ ^vm-image-.*\.tar\.gz$ ]]; then
+    # NEW VM image naming (vm-image.tar.gz or vm-image-*.tar.gz)
+    elif [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz$ ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
     # OLD VM image naming (gm-vm-image-*)
@@ -3234,10 +3234,10 @@ import_from_github(){
       vm_image_name="$name"
       vm_image_url="$url"
     # OLD VM image checksum
-    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image-.*\.tar\.gz\.sha256$ ]]; then
+    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz\.sha256$ ]]; then
       vm_checksum_url="$url"
-    # NEW container image naming (container-image-*)
-    elif [[ "$name" =~ ^container-image-.*\.tar\.gz$ ]]; then
+    # NEW container image naming (container-image.tar.gz or container-image-*.tar.gz)
+    elif [[ "$name" =~ ^container-image(-.*)?\.tar\.gz$ ]]; then
       container_image_name="$name"
       container_image_url="$url"
     # OLD container image naming (gm-container-image-*)
@@ -3245,7 +3245,7 @@ import_from_github(){
       container_image_name="$name"
       container_image_url="$url"
     # OLD container image checksum
-    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image-.*\.tar\.gz\.sha256$ ]]; then
+    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image(-.*)?\.tar\.gz\.sha256$ ]]; then
       container_checksum_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
@@ -5435,7 +5435,7 @@ METADATA
   # Step 7: Create VM image archive within export folder
   echo ""
   echo "[6/7] Creating VM image archive..."
-  local vm_archive_name="vm-image-${export_timestamp}.tar.gz"
+  local vm_archive_name="vm-image.tar.gz"
   local vm_archive_path="$export_dir/${vm_archive_name}"
   
   # Archive the VM files (excluding blockchain parts and manifest)
@@ -8162,7 +8162,7 @@ METADATA
   
   echo ""
   echo "[3/3] Creating container image archive..."
-  local image_archive_name="container-image-${export_timestamp}.tar.gz"
+  local image_archive_name="container-image.tar.gz"
   local image_archive_path="$export_dir/${image_archive_name}"
   
   # Archive the temporary directory contents
@@ -8761,8 +8761,8 @@ import_from_github_container(){
     # OLD blockchain checksum
     elif [[ "$name" == "gm-blockchain.tar.gz.sha256" ]]; then
       blockchain_checksum_url="$url"
-    # NEW container image naming (container-image-*)
-    elif [[ "$name" =~ ^container-image-.*\.tar\.gz$ ]]; then
+    # NEW container image naming (container-image.tar.gz or container-image-*.tar.gz)
+    elif [[ "$name" =~ ^container-image(-.*)?\.tar\.gz$ ]]; then
       container_image_name="$name"
       container_image_url="$url"
     # OLD container image naming (gm-container-image-*)
@@ -8770,10 +8770,10 @@ import_from_github_container(){
       container_image_name="$name"
       container_image_url="$url"
     # OLD container image checksum
-    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image-.*\.tar\.gz\.sha256$ ]]; then
+    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image(-.*)?\.tar\.gz\.sha256$ ]]; then
       container_checksum_url="$url"
-    # NEW VM image naming (vm-image-*)
-    elif [[ "$name" =~ ^vm-image-.*\.tar\.gz$ ]]; then
+    # NEW VM image naming (vm-image.tar.gz or vm-image-*.tar.gz)
+    elif [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz$ ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
     # OLD VM image naming (gm-vm-image-*)
@@ -8781,7 +8781,7 @@ import_from_github_container(){
       vm_image_name="$name"
       vm_image_url="$url"
     # OLD VM image checksum
-    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image-.*\.tar\.gz\.sha256$ ]]; then
+    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz\.sha256$ ]]; then
       vm_checksum_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
@@ -9145,10 +9145,13 @@ import_from_github_container(){
   echo "Extracting container image archive..."
   tar -xzf "$download_dir/$container_image_name" -C "$container_extract_dir"
   
-  # Find the container tar file
-  local container_tar=$(find "$container_extract_dir" -name "garbageman-image.tar" | head -n1)
+  # Find the container tar file (handle both formats)
+  local container_tar=$(find "$container_extract_dir" -name "container-image.tar" | head -n1)
   if [[ -z "$container_tar" ]]; then
-    pause "❌ No garbageman-image.tar file found in container image archive"
+    container_tar=$(find "$container_extract_dir" -name "garbageman-image.tar" | head -n1)
+  fi
+  if [[ -z "$container_tar" ]]; then
+    pause "❌ No container-image.tar file found in container image archive"
     return
   fi
   
