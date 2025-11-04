@@ -3111,12 +3111,6 @@ import_from_github(){
     rm -rf "$dir/blockchain-data" "$dir/vm-image" 2>/dev/null
   }
   
-  # Let user configure defaults for resource allocation
-  if ! configure_defaults_direct; then
-    pause "Cancelled."
-    return
-  fi
-  
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
   echo "║              Import Base VM from GitHub (Modular Download)                     ║"
@@ -3280,6 +3274,16 @@ import_from_github(){
     echo "  Total: $total_size"
   fi
   echo ""
+  
+  # Configure resources before downloading
+  echo "Before downloading, let's configure resource allocation:"
+  echo ""
+  
+  # Let user configure defaults for resource allocation
+  if ! configure_defaults_direct; then
+    pause "Cancelled."
+    return
+  fi
   
   local download_message="This will download approximately $total_size of data.\n\nBlockchain parts: ${#blockchain_part_urls[@]}\nVM image: $vm_image_name"
   if [[ -n "$container_image_url" ]]; then
