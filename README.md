@@ -177,7 +177,7 @@ These settings are **critical** for acceptable performance, and can be edited in
 - Set **Processor(s)** to at least 4 cores (8+ recommended)
 - Set **Processing Cap** to 100% (ensure VM isn't throttled)
 
-**Acceleration Tab:**
+**Acceleration Tab:** _(if page blanks, open General Tab then come back)_
 - **Paravirtualization Interface:**
   - **(for VM mode):** Set to **KVM** (best performance for nested virtualization)
   - **(for Container mode):** Set to **Default** (may have better compatibility)
