@@ -9174,7 +9174,7 @@ import_from_github_container(){
   
   # Get the loaded image name
   local image_name
-  image_name=$(container_cmd images --filter "reference=garbageman:latest" --format "{{.Repository}}:{{.Tag}}" | head -n1)
+  image_name=$(container_cmd images --filter "reference=garbageman-base:latest" --format "{{.Repository}}:{{.Tag}}" | head -n1)
   if [[ -z "$image_name" ]]; then
     pause "❌ Failed to find loaded container image"
     return
