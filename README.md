@@ -1,8 +1,8 @@
 # Garbageman VM Manager
 
-**Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes on Linux Mint 22.2**
+**Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes on Linux**
 
-Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle, each with its own Tor hidden service for maximum privacy.
+Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle, each with its own Tor hidden service for maximum privacy. Choose between **Containers** (Docker/Podman) for lightweight efficiency or **Virtual Machines** (VMs) for greater stability on some systems.
 
 <img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/6af100e5-c873-4c26-b848-6a5ecdf17dbc" />
 
@@ -16,12 +16,13 @@ Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle,
 
 This script makes it **dead simple** (in theory) to:
 
-- ✅ Create a lightweight Bitcoin Garbageman node in a virtual machine (VM)
+- ✅ Create a lightweight Bitcoin Garbageman node in a container **or** VM
+- ✅ Choose between Containers (lightweight, faster) or VMs (more stable on some systems)
 - ✅ Monitor the Initial Block Download (IBD) sync with a live progress display
 - ✅ Clone your synced node multiple times for redundancy
 - ✅ Each clone gets its own unique Tor `.onion` address (privacy-first!)
-- ✅ Export and transfer VMs securely between systems (all sensitive data removed)
-- ✅ Automatically manage resources so your desktop stays responsive
+- ✅ Export and transfer containers/VMs securely between systems
+- ✅ Automatically manage resources (CPU/RAM/Disk) so your system stays responsive
 
 **No manual configuration needed** - the script handles everything from building the software to setting up Tor networking.
 
@@ -30,38 +31,120 @@ This script makes it **dead simple** (in theory) to:
 
 ---
 
+## �🚀 Quick Start
+
+### 1. Download the Script
+
+```bash
+sudo apt-get install -y git
+cd ~
+git clone https://github.com/paulscode/garbageman-vmm.git
+```
+
+### 2. Run It!
+
+```bash
+cd ~/garbageman-vmm && git pull && ./garbageman-vmm.sh
+```
+
+That's it! The script will:
+1. Install any missing dependencies (asks for your password once)
+2. Show you a menu with clear options
+3. Guide you through each step
+
+---
+
+## 🆚 Containers vs VMs: Which Should You Choose?
+
+### Containers (Recommended)
+**Best for:** Users who want efficiency and faster operations
+
+✅ **Pros:**
+- Lower resource overhead
+- Faster startup (seconds vs minutes)
+- Faster cloning operations
+- More efficient disk space usage (shared base image)
+- Works with Docker or Podman
+
+❌ **Cons:**
+- Requires Docker or Podman installed
+- Less isolation than VMs (shares host/sandbox kernel)
+
+**Resource Usage:**
+- ~2GB RAM per node after sync
+- ~150MB overhead per container (runtime daemon)
+
+### Virtual Machines (Legacy)
+**Best for:** Users who have experience instability with containers
+
+✅ **Pros:**
+- Complete isolation from host/sandbox
+- Works with existing VM management tools
+- Full OS environment inside VM
+
+❌ **Cons:**
+- Higher resource overhead (~200MB per VM)
+- Slower startup times
+- Requires nested virtualization if running in VirtualBox sandbox
+
+**Resource Usage:**
+- ~2GB RAM per node after sync
+- ~200MB overhead per VM (hypervisor, page tables)
+
+### Quick Decision Guide
+
+**Choose Containers if you:**
+- Want to maximize efficiency
+- Need faster startup and cloning
+- Have experience with Docker/Podman
+
+**Choose VMs if you:**
+- Experience instability with containers
+- Have experience with libvirt/qemu
+
+**Note:** The script auto-detects which mode you're using based on whether you've created a container or VM. You only choose once!
+
 ## 💻 Requirements
 
 ### Minimum System
 - **OS:** Linux Mint 22.2 Cinnamon (or Ubuntu 24.04-based distros)
-- **CPU:** 4 cores (2 cores + 2 reserved for host)
-- **RAM:** 8 GB (4 GB + 4 GB reserved for host)
-- **Disk:** 50 GB free space (25 GB per VM, uses sparse allocation)
+- **CPU:** 4 cores (2 cores + 2 reserved for host/sandbox)
+- **RAM:** 8 GB (4 GB + 4 GB reserved for host/sandbox)
+- **Disk:** 50 GB free space (25 GB per container/VM, uses sparse allocation)
 - **Internet:** Broadband connection for blockchain sync
 
 ### Recommended System
 - **CPU:** 8+ cores
 - **RAM:** 16+ GB
-- **Disk:** 100+ GB free space
+- **Disk:** 100+ GB free space (more = more clones possible)
 - **Faster CPU = faster initial blockchain sync**
 
 ### What Gets Installed
-The script automatically installs required packages:
-- Virtualization: `qemu-kvm`, `libvirt`, `virt-manager`
+
+**For Container Mode:**
+- Container runtime: `docker` OR `podman` (script auto-detects which is available)
+- Build tools: `git` (only if building from scratch)
+- Utilities: `jq`, `dialog`, `whiptail`
+
+**For VM Mode:**
+- Virtualization: `qemu-kvm`, `libvirt-daemon-system`, `libvirt-clients`, `virtinst`, `libguestfs-tools`
 - Build tools: `git`, `cmake`, `gcc`
 - Utilities: `jq`, `dialog`, `whiptail`
+
+**All dependencies are installed automatically** when you first run the script.
 
 ---
 
 ## � Running in VirtualBox
 
-I recommend running this script **inside a VirtualBox VM** with a Linux Mint 22.2 guest, so that it is sandboxed from the rest of your computer.  This section explains how to optimize VirtualBox for running VMs inside of a VM ("VM Inception", so to speak)
+I recommend running this script **inside a VirtualBox VM** with a Linux Mint 22.2 guest, so that it is sandboxed from the rest of your computer.  This section explains how to optimize VirtualBox for running containers or VMs inside of a VM.
 
 ### Why VirtualBox Performance Matters
 
 This script performs CPU and I/O intensive operations:
 - **Compilation:** Building Bitcoin software (30+ minutes of heavy CPU use)
-- **Nested Virtualization:** Creates Alpine VMs inside your Linux Mint VM using libguestfs/KVM
+- **Container operations:** Building Docker images and managing container volumes
+- **Nested Virtualization (VM mode):** Creates Alpine VMs inside your Linux Mint VM using libguestfs/KVM
 - **Blockchain Sync:** Downloads and validates 25+ GB of blockchain data with constant disk I/O
 
 Without proper VirtualBox configuration, these operations can be 3-5x slower than native performance.
@@ -88,7 +171,7 @@ These settings are **critical** for acceptable performance, and can be edited in
 
 **Processor Tab:**
 - ✅ **Enable PAE/NX:** Required for 64-bit Linux
-- ✅ **Enable Nested VT-x/AMD-V:** **CRITICAL** - Required for nested virtualization (VMs inside of a VM)
+- ✅ **Enable Nested VT-x/AMD-V:** **IMPORTANT** for VM mode - Enables nested virtualization (VMs inside a VM). Not required for container mode.
 - Set **Processor(s)** to at least 4 cores (8+ recommended)
 - Set **Execution Cap** to 100% (ensure VM isn't throttled)
 
@@ -126,7 +209,7 @@ These settings are **critical** for acceptable performance, and can be edited in
 
 Before running the script, verify these VirtualBox settings:
 
-- [ ] **Nested VT-x/AMD-V enabled** (System → Processor)
+- [ ] **Nested VT-x/AMD-V enabled** (System → Processor) - Important for VM mode
 - [ ] **Paravirtualization Interface = KVM** (System → Acceleration)
 - [ ] **VirtIO SCSI controller** with Host I/O Cache enabled (Storage)
 - [ ] **virtio-net network adapter** (Network → Advanced)
@@ -138,9 +221,9 @@ Before running the script, verify these VirtualBox settings:
 - [ ] **3D acceleration disabled** (Display)
 - [ ] **Audio disabled** (Audio)
 
-### Verifying Nested Virtualization Works
+### Verifying Nested Virtualization Works (VM Mode Only)
 
-After starting your Linux Mint VM, verify that nested virtualization is working:
+If you plan to use VM mode, verify that nested virtualization is working after starting your Linux Mint VM:
 
 ```bash
 # Check if KVM is available
@@ -159,37 +242,7 @@ lsmod | grep kvm
 If any of these checks fail:
 1. Ensure **Nested VT-x/AMD-V** is enabled in VirtualBox settings
 2. Power off the VM completely and restart it (settings only apply after full shutdown)
-3. Check your host BIOS has virtualization enabled (VT-x/AMD-V)
-
----
-
-## �🚀 Quick Start
-
-### 1. Download the Script
-
-```bash
-sudo apt-get install -y git
-cd ~
-git clone https://github.com/paulscode/garbageman-vmm.git
-cd garbageman-vmm
-```
-
-### 2. Make It Executable
-
-```bash
-chmod +x garbageman-vmm.sh
-```
-
-### 3. Run It!
-
-```bash
-~/garbageman-vmm/garbageman-vmm.sh
-```
-
-That's it! The script will:
-1. Install any missing dependencies (asks for your password once)
-2. Show you a menu with clear options
-3. Guide you through each step
+3. Check your host/sandbox BIOS has virtualization enabled (VT-x/AMD-V)
 
 ---
 
@@ -197,53 +250,85 @@ That's it! The script will:
 
 ### Typical Workflow
 
+### Typical Workflow
+
 Here's the normal sequence most users follow:
 
-1. **First time:** Configure Defaults (Option 7) - *optional, can use defaults*
-2. **Create:** Create Base VM (Option 1) - *2+ hours*
-3. **Sync:** Monitor Base VM Sync (Option 2) - *24-28 hours, can pause/resume*
-4. **Clone:** Create Clone VMs (Option 4) - *1-2 minutes per clone*
-5. **Start clones:** Manage Clone VMs (Option 5) → Start each clone
-6. **Daily use:** Use Options 3 and 5 to start/stop VMs as needed
+1. **Choose:** First run selects deployment mode (Container or VM) - *one-time choice*
+2. **Configure:** Configure Defaults (Option 7) - *optional, can use defaults*
+3. **Create:** Create Base Container/VM (Option 1) - *2+ hours*
+4. **Sync:** Monitor Base Sync (Option 2) - *24-28 hours, can pause/resume*
+5. **Clone:** Create Clones (Option 4) - *1-2 minutes per clone*
+6. **Start clones:** Manage Clones (Option 5) → Start each clone
+7. **Daily use:** Use Options 3 and 5 to start/stop as needed
 
-**💡 Pro tip:** Leave the base VM running for stability, start/stop clones based on your resource needs.
+**💡 Pro tip:** Leave the base container/VM running so it remains synced, start/stop clones based on your resource needs.
 
 ---
 
 ### First Time Setup
 
+#### Step 0: Choose Deployment Mode (First Run Only)
+
+**On first run, the script will ask:** "Do you want to use Containers or Virtual Machines?"
+
+- **Containers:** Recommended approach, lightweight (requires Docker or Podman)
+- **Virtual Machines:** Legacy approach, more stable on some systems (requires libvirt/qemu-kvm)
+
+**This choice is locked once you create your base** - the script will remember your choice for all future runs.
+
+See the [Containers vs VMs](#-vms-vs-containers-which-should-you-choose) section above to help decide.
+
 #### Step 1: Configure Your Preferences (Optional)
 
 When you first run the script, you can optionally choose **"Configure Defaults"** from the menu to customize:
 
-- **Host Reserves:** How many CPU cores and RAM to keep available for your desktop (default: 2 cores, 4 GB)
-- **VM Runtime Resources:** How much CPU/RAM each VM uses after sync (default: 1 core, 2 GB per VM)
-- **Clearnet Option:** Whether to allow clearnet connections on the base VM for faster initial sync (default: yes)
+- **Host/Sandbox Reserves:** How many CPU cores, RAM, and disk space to keep available for your system (default: 2 cores, 4 GB RAM, 20 GB disk)
+- **container/VM Runtime Resources:** How much CPU/RAM each instance uses after sync (default: 1 core, 2 GB per instance)
+- **Clearnet Option:** Whether to allow clearnet connections on the base for faster initial sync (default: yes, clones are always Tor-only)
 
 **Most users can skip this** and use the defaults!
 
-#### Step 2: Create Base VM
+**Note:** The script is intelligent about capacity:
+- Calculates how many clones you can run based on CPU, RAM, **and disk space**
+- Suggests clone counts that won't max out any resource
+- Shows which resource (CPU/RAM/Disk) is limiting your capacity
 
-Choose **"Create Base VM"** from the menu. You have three options:
+#### Step 2: Create Base Container/VM
 
-**Option 1: Import from GitHub** (~22GB download, then ready to use)
+Choose **"Create Base Container/VM"** from the menu. You have three options:
+
+**Option 1: Import from GitHub** (modular downloads, ~1-21GB - works for both containers and VMs!)
 1. Fetches available releases from GitHub
-2. Downloads pre-synced VM in parts (~22GB total)
-3. Automatically reassembles and verifies checksum
-4. Imports directly - ready to clone immediately!
-5. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
+2. Downloads components based on your choice:
+   - **Container:** Downloads blockchain parts (~20GB) + container image (~500MB)
+   - **VM:** Downloads blockchain parts (~20GB) + VM image (~1GB)
+3. Automatically reassembles blockchain and verifies all checksums
+4. Imports and combines blockchain with container/VM image
+5. Ready to clone immediately!
+6. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
 
 **Option 2: Import from File** (for transferring between your own machines)
 1. Select an export archive from `~/Downloads/`
-2. Verify checksum automatically
-3. Import the pre-synced blockchain
-4. Ready in minutes instead of days!
+2. Supports both old monolithic format and new modular format:
+   - **Modular:** Separate blockchain + container/VM image (recommended)
+   - **Old format:** Single large archive (still supported)
+3. Verify checksums automatically
+4. Import the pre-synced blockchain and image
+5. Ready in minutes instead of days!
+6. Works for both VMs and containers (separate export formats)
 
 **Option 3: Build from Scratch** (2+ hours compile, 24-28 hours sync)
-1. Download Alpine Linux (tiny, fast VM OS)
-2. **Build Garbageman inside the VM** (typically takes more than 2 hours, depending on your CPU)
+1. Build Docker image (Containers) or download Alpine Linux base (VMs)
+2. **Build Garbageman inside the container/VM** (typically takes 2+ hours, depending on your CPU)
 3. Configure Tor and Bitcoin services
-4. Stop the VM and leave it ready to sync
+4. Create base instance ready to sync
+
+**Container vs VM Build Differences:**
+- **Containers:** Multi-stage Dockerfile build (faster, more efficient)
+- **VMs:** Uses libguestfs to build inside Alpine VM (stable, proven approach)
+- Both compile from the same Garbageman source code
+- Both result in identical Bitcoin node behavior
 
 **After creation, you'll be prompted for sync resources:**
 - The script suggests using most of your available CPU/RAM for faster sync
@@ -251,11 +336,13 @@ Choose **"Create Base VM"** from the menu. You have three options:
 
 #### Step 3: Start Sync & Monitor
 
-Choose **"Base VM Monitor Sync"** from the menu. This will:
+Choose **"Monitor Base Sync"** from the menu. This will:
 
 1. **Prompt you to confirm/change resources** (in case you want different settings than creation time)
-2. Start the VM with your chosen resources (or connect to it if already running)
+2. Start the container/VM with your chosen resources (or connect to it if already running)
 3. Show a **live auto-refreshing progress display**:
+
+   **For VMs:**
    ```
    ╔════════════════════════════════════════════════════════════════════════════════╗
    ║                     Garbageman IBD Monitor - 26% Complete                      ║
@@ -273,44 +360,80 @@ Choose **"Base VM Monitor Sync"** from the menu. This will:
    ║    Blocks:   529668 / 921108                                                   ║
    ║    Progress: 26% (0.255699756115667)                                           ║
    ║    IBD:      true                                                              ║
-   ║    Peers:    14                                                                ║
+   ║    Peers:    14 (2 LR/GM, 3 KNOTS, 1 OLDCORE, 7 COREv30+, 1 OTHER)             ║
    ║                                                                                ║
    ╠════════════════════════════════════════════════════════════════════════════════╣
-   ║  Auto-refreshing every 5 seconds... Press Ctrl+C to exit                       ║
+   ║  Auto-refreshing every 5 seconds... Press 'q' to exit                          ║
    ╚════════════════════════════════════════════════════════════════════════════════╝
    ```
+
+   **For Containers:**
+   ```
+   ╔════════════════════════════════════════════════════════════════════════════════╗
+   ║                    Garbageman IBD Monitor - 26% Complete                       ║
+   ╠════════════════════════════════════════════════════════════════════════════════╣
+   ║                                                                                ║
+   ║  Host Resources:                                                               ║
+   ║    Cores: 8 total | 2 reserved | 6 available                                   ║
+   ║    RAM:   24032 MiB total | 4096 MiB reserved | 19936 MiB available            ║
+   ║                                                                                ║
+   ║  Container Status:                                                             ║
+   ║    Name:  gm-base                                                              ║
+   ║    Image: garbageman:latest                                                    ║
+   ║                                                                                ║
+   ║  Bitcoin Sync Status:                                                          ║
+   ║    Blocks:   529668 / 921108                                                   ║
+   ║    Progress: 26% (0.255699756115667)                                           ║
+   ║    IBD:      true                                                              ║
+   ║    Peers:    14 (2 LR/GM, 3 KNOTS, 1 OLDCORE, 7 COREv30+, 1 OTHER)             ║
+   ║                                                                                ║
+   ╠════════════════════════════════════════════════════════════════════════════════╣
+   ║  Auto-refreshing every 5 seconds... Press 'q' to exit                          ║
+   ╚════════════════════════════════════════════════════════════════════════════════╝
+   ```
+
 4. Auto-refresh every 5 seconds (no manual refresh needed)
-5. When sync completes, automatically shut down the VM and resize it to runtime resources
+5. When sync completes, automatically shut down and resize to runtime resources (VMs) or update limits (containers)
 
 **⏰ How long does sync take?**
 - With 8+ cores, >8 GB RAM: ~24 hours (depends on multiple factors)
 - With 4+ cores <8 GB RAM: >48 hours
 - You can stop and resume anytime - progress is saved!
 
-**💡 Tip:** Press Ctrl+C anytime to exit the monitor. The VM keeps running in the background, and you can reconnect later by choosing "Monitor Base VM Sync" again (it will detect the VM is already running and let you change resources if needed).
+**💡 Tip:** Press 'q' anytime to exit the monitor. The container/VM keeps running in the background, and you can reconnect later by choosing "Monitor Base Sync" again (it will detect the instance is already running and let you change resources if needed).
+
+**Container Note:** Containers can be resized on-the-fly without restarting (uses `docker update` or `podman update`). VMs require shutdown/restart to change resources.
 
 #### Step 4: Clone Your Synced Node
 
-Once your base VM finishes syncing, you can create clones!
+Once your base container/VM finishes syncing, you can create clones!
 
-Choose **"Create Clone VMs (gm-clone-*)"** from the menu:
+Choose **"Create Clones (gm-clone-*)"** from the menu:
 
-1. Script shows how many clones your system can handle
+1. Script shows how many clones your system can handle (based on CPU, RAM, **and disk space**)
 2. Enter desired number of clones
-3. If the base VM is running, it will automatically shut it down gracefully (may take up to 3 minutes)
+3. If the base is running, it will automatically shut it down gracefully (ensures consistent data during clone)
 4. Each clone:
-   - Copies the fully-synced blockchain (no re-download!)
+   - **Copies the fully-synced blockchain** (no re-download!)
    - Gets a fresh Tor `.onion` address
-   - Is **forced to Tor-only** (maximum privacy)
+   - Is **forced to Tor-only** (maximum privacy, even if base allows clearnet)
    - Uses minimal resources (1 core, 2 GB RAM by default)
-   - Named with timestamp (e.g., `gm-clone-20251025-143022`)
-5. After cloning completes, clones are left in "shut off" state - start them using **"Manage Clone VMs"**
+   - Named with timestamp (e.g., `gm-clone-20251103-143022`)
+5. After cloning completes, clones are left in stopped state - start them using **"Manage Clones"**
 
-**Example:** On a 16 GB / 8-core system with defaults:
-- Host reserves: 2 cores, 4 GB RAM
-- Available: 6 cores, 12 GB RAM
-- Runtime per VM: 1 core, 2 GB RAM
-- **You can run 6 VMs simultaneously** (1 base + 5 clones)
+**Example:** On a 16 GB / 8-core / 100 GB disk system with defaults:
+- Host/sandbox reserves: 2 cores, 4 GB RAM, 20 GB disk
+- Available: 6 cores, 12 GB RAM, 80 GB disk
+- Runtime per instance: 1 core, 2 GB RAM, 25 GB disk
+- **CPU capacity:** 6 instances (6 cores / 1 core each)
+- **RAM capacity:** 6 instances (12 GB / 2 GB each)
+- **Disk capacity:** 3 instances (80 GB / 25 GB each)
+- **Maximum clones:** 3 total (limited by disk space!)
+
+**Container vs VM Cloning:**
+- **Containers:** Copy data between volumes (~1 minute per clone, faster due to shared image)
+- **VMs:** Use `virt-clone` to copy disk image (~2 minutes per clone)
+- Both result in identical blockchain state and Tor isolation
 
 ---
 
@@ -318,64 +441,116 @@ Choose **"Create Clone VMs (gm-clone-*)"** from the menu:
 
 ### Main Menu
 
+The script displays different menus depending on whether you're using Containers or VMs:
+
+**Container Mode:**
 ```
-┌─────────────────────────────────────────────────┐
-│         Garbageman VM Manager                   │
-│                                                 │
-│  1. Create Base VM (gm-base)                    │
-│  2. Monitor Base VM Sync (gm-base)              │
-│  3. Manage Base VM (gm-base)                    │
-│  4. Create Clone VMs (gm-clone-*)               │
-│  5. Manage Clone VMs (gm-clone-*)               │
-│  6. Capacity Suggestions (host-aware)           │
-│  7. Configure Defaults (reserves, runtime)      │
-│  8. Quit                                        │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│ Garbageman Container Manager                                                            │
+│                                                                                         │
+│ Deployment: Containers (docker)                                                         │
+│ Host: 8 cores / 24032 MiB   |   Reserve: 2 cores / 4096 MiB                             │
+│ Available after reserve: 6 cores / 19936 MiB                                            │
+│ Base Container exists: Yes                                                              │
+│                                                                                         │
+│ Choose an action:                                                                       │
+│                                                                                         │
+│  1  Create Base Container (gm-base)                                                     │
+│  2  Monitor Base Container Sync (gm-base)                                               │
+│  3  Manage Base Container (gm-base)                                                     │
+│  4  Create Clone Containers (gm-clone-*)                                                │
+│  5  Manage Clone Containers (gm-clone-*)                                                │
+│  6  Capacity Suggestions (host-aware)                                                   │
+│  7  Configure Defaults (reserves, runtime, clearnet)                                    │
+│  8  Quit                                                                                │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Option 1: Create Base VM
-- **When to use:** First time setup, or to rebuild from scratch
-- **What it does:** Builds everything and creates your base node
-- **Time:** 2+ hours (mostly compilation time)
+**VM Mode:**
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│ Garbageman VM Manager                                                                   │
+│                                                                                         │
+│ Deployment: VMs (libvirt/qemu)                                                          │
+│ Host: 8 cores / 24032 MiB   |   Reserve: 2 cores / 4096 MiB                             │
+│ Available after reserve: 6 cores / 19936 MiB                                            │
+│ Base VM exists: Yes                                                                     │
+│                                                                                         │
+│ Choose an action:                                                                       │
+│                                                                                         │
+│  1  Create Base VM (gm-base)                                                            │
+│  2  Monitor Base VM Sync (gm-base)                                                      │
+│  3  Manage Base VM (gm-base)                                                            │
+│  4  Create Clone VMs (gm-clone-*)                                                       │
+│  5  Manage Clone VMs (gm-clone-*)                                                       │
+│  6  Capacity Suggestions (host-aware)                                                   │
+│  7  Configure Defaults (reserves, runtime, clearnet)                                    │
+│  8  Quit                                                                                │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-#### Option 2: Monitor Base VM Sync
-- **When to use:** After creating the base VM, to sync the blockchain
-- **What it does:** Connects to the VM (starts it if stopped) and shows live auto-refreshing IBD progress
+#### Option 1: Create Base Container/VM
+- **When to use:** First time setup
+- **What it does:** Creates your initial Garbageman node (container or VM)
+- **Three methods:** Import from GitHub (both container and VM), Import from file, Build from scratch
+- **Time:** Minutes (import) or 2+ hours (build from scratch)
+- **Deployment choice:** Locked after first base is created
+- **Modular imports:** New format separates blockchain from container/VM image for efficiency
+
+#### Option 2: Monitor Base Sync
+- **When to use:** After creating the base, to sync the blockchain
+- **What it does:** Connects to the instance (starts it if stopped) and shows live auto-refreshing IBD progress
 - **Time:** 24-28 hours (varies greatly, due to multiple factors)
-- **Can be resumed:** Yes! Press Ctrl+C to exit monitor anytime (VM keeps running)
-- **On completion:** Automatically shuts down VM and resizes to runtime resources
+- **Can be resumed:** Yes! Press Ctrl+C to exit monitor anytime (instance keeps running)
+- **On completion:** Automatically shuts down and resizes to runtime resources (VMs) or updates limits (containers)
+- **Container benefit:** Can resize RAM/CPU on-the-fly without restart
 
-#### Option 3: Manage Base VM
-- **When to use:** Simple start/stop/status controls for the base VM, or to export for transfer
-- **What it does:** Power on/off the base VM, check status, or create a sanitized export
+#### Option 3: Manage Base
+- **When to use:** Simple start/stop/status controls for the base, or to export for transfer
+- **What it does:** Power on/off the base instance, check status, or create a modular export
 - **Shows when running:** Tor .onion address and current block height
-- **Export feature:** Creates a secure, portable export (removes all sensitive data: Tor keys, SSH keys, peer databases, logs)
-- **Export format:** Compressed tar.gz archive (~10-15 GB) with SHA256 checksum, saved to ~/Downloads
+- **Export feature (NEW MODULAR FORMAT):** 
+  - Exports blockchain data separately (~20GB, split into GitHub-compatible 1.9GB parts)
+  - Exports container/VM image separately (~500MB-1GB, without blockchain)
+  - Both components have matching timestamps for easy reassembly
+  - All files SHA256 checksummed for integrity verification
+  - Removes all sensitive data: Tor keys, SSH keys, peer databases, logs
+- **Export benefits:**
+  - Smaller container/VM downloads (~1GB vs ~22GB)
+  - Blockchain can be reused across multiple exports
+  - Can update container/VM without re-exporting blockchain
+  - All files under 2GB (GitHub release compatible)
+- **Export location:** Components saved to `~/Downloads/`
 - **Time:** Instant for start/stop/status; 10-30 minutes for export
+- **Cleanup option:** Container mode includes orphaned volume cleanup
 
-#### Option 4: Create Clone VMs (gm-clone-*)
-- **When to use:** After base VM is fully synced
+#### Option 4: Create Clones
+- **When to use:** After base is fully synced
 - **What it does:** Creates additional nodes with unique .onion addresses
-- **Time:** 1-2 minutes per clone
-- **Blockchain re-sync:** No! Clones copy the synced data
-- **Auto-shutdown:** Automatically stops base VM if running (graceful, up to 3 minutes)
+- **Time:** 1-2 minutes per clone (containers slightly faster than VMs)
+- **Blockchain re-sync:** No! Clones copy the synced data from base
+- **Auto-shutdown:** Automatically stops base if running (graceful, ensures data consistency)
+- **Capacity check:** Shows how many clones you can create (limited by CPU/RAM/Disk, whichever is most constrained)
 
-#### Option 5: Manage Clone VMs (gm-clone-*)
+#### Option 5: Manage Clones
 - **When to use:** Control existing clones
-- **What it does:** Start, stop, or delete clone VMs
+- **What it does:** Start, stop, monitor, or delete clone instances
 - **Shows when running:** Tor .onion address and current block height for each clone
+- **Live monitor:** Real-time status updates every 5 seconds
 - **Time:** Instant
 
-#### Option 6: Capacity Suggestions (host-aware)
+#### Option 6: Capacity Suggestions (host/sandbox-aware)
 - **When to use:** Planning how many nodes you can run
 - **What it does:** Shows detailed resource breakdown and clone capacity
+- **Displays:** CPU capacity, RAM capacity, Disk capacity, and which resource is limiting
 
 #### Option 7: Configure Defaults (reserves, runtime, clearnet)
 - **When to use:** Adjust how resources are allocated
-- **What it does:** Reset to original host-aware defaults or customize reserves, VM sizes, and clearnet option
+- **What it does:** Reset to original host/sandbox-aware defaults or customize reserves, instance sizes, and clearnet option
 - **Options:**
-  - **Reset to Original Values:** Restores hardcoded defaults (2 cores, 4GB reserve, 1 vCPU/2GB RAM per VM)
+  - **Reset to Original Values:** Restores hardcoded defaults (2 cores, 4GB RAM, 20GB disk reserve; 1 vCPU/2GB RAM/25GB disk per instance)
   - **Choose Custom Values:** Fine-tune each setting individually
+- **Applies to:** Both containers and VMs use the same settings for consistency
 
 ---
 
@@ -401,8 +576,8 @@ proxy=127.0.0.1:9050   # All traffic through Tor SOCKS proxy
 
 This configuration ensures **complete Tor isolation** - no clearnet IP exposure.
 
-### Base VM Clearnet Option
-The base VM can optionally use **Tor + clearnet** (configurable):
+### Base Container/VM Clearnet Option
+The base container/VM can optionally use **Tor + clearnet** (configurable):
 - **Why clearnet?** Faster initial sync with more peer options
 - **After sync:** You can keep it or switch to Tor-only
 - **Clones:** Always Tor-only regardless of base setting
@@ -427,13 +602,13 @@ The script uses a **three-phase resource model**:
 - **Why:** More CPU = faster compilation
 
 #### Phase 2: Initial Sync (Temporary)
-- **Duration:** 24-28 hours (one-time per base VM)
+- **Duration:** 24-28 hours (one-time per base container/VM)
 - **Resources:** You configure this (default: all available after reserves)
 - **Why:** More resources = faster blockchain download
 
 #### Phase 3: Runtime (Long-term)
-- **Duration:** Forever (or until you stop the VMs)
-- **Resources:** Smaller footprint (default: 1 core, 2 GB per VM)
+- **Duration:** Forever (or until you stop the containers/VMs)
+- **Resources:** Smaller footprint (default: 1 core, 2 GB per container/VM)
 - **Why:** Pruned nodes don't need much after sync
 
 ### Example Resource Allocation
@@ -442,13 +617,13 @@ The script uses a **three-phase resource model**:
 
 **Defaults:**
 ```
-Host reserves:     4 GB RAM, 2 cores (for your desktop)
-Available:        12 GB RAM, 6 cores (for VMs)
+Host/sandbox reserves: 4 GB RAM, 2 cores (for your desktop)
+Available:             12 GB RAM, 6 cores (for containers/VMs)
 
-Phase 2 (sync):   12 GB RAM, 6 cores (base VM only)
-Phase 3 (runtime): 2 GB RAM, 1 core (per VM)
+Phase 2 (sync):   12 GB RAM, 6 cores (base container/VM only)
+Phase 3 (runtime): 2 GB RAM, 1 core (per container/VM)
 
-Capacity: 6 VMs simultaneously (1 base + 5 clones)
+Capacity: 6 containers/VMs simultaneously (1 base + 5 clones)
 ```
 
 **Adjustable in "Configure Defaults"!**
@@ -457,61 +632,73 @@ Capacity: 6 VMs simultaneously (1 base + 5 clones)
 
 ## ❓ Frequently Asked Questions
 
-### Should I use "Monitor Base VM Sync" or "Manage Base VM"?
+### Should I use "Monitor Base container/VM Sync" or "Manage Base container/VM"?
 
-- **Monitor Base VM Sync (Option 2):** Use this when you want to watch the blockchain sync progress with a live updating display. Best for initial sync or checking sync status.
-- **Manage Base VM (Option 3):** Use this for simple start/stop/status controls, or to export the VM for transfer to another system. Shows .onion address and current block height when running. Good for daily management and creating portable backups.
+- **Monitor Base container/VM Sync (Option 2):** Use this when you want to watch the blockchain sync progress with a live updating display. Best for initial sync or checking sync status.
+- **Manage Base container/VM (Option 3):** Use this for simple start/stop/status controls, or to export the container/VM for transfer to another system. Shows .onion address and current block height when running. Good for daily management and creating portable backups.
 
-Both can start the VM, but Option 2 provides detailed monitoring while Option 3 is quicker for basic operations.
+Both can start the container/VM, but Option 2 provides detailed monitoring while Option 3 is quicker for basic operations.
 
-### How much disk space does each VM use?
+### How much disk space does each container/VM use?
 
-- **Base VM after sync:** ~25 GB (pruned blockchain + OS)
-- **Each clone:** ~25 GB (copy of base VM)
+- **Base container/VM after sync:** ~25 GB (pruned blockchain + OS)
+- **Each clone:** ~25 GB (copy of base container/VM)
 - **Format:** qcow2 with sparse allocation (only uses space it needs)
 - **Clone naming:** Clones are named with timestamps (e.g., `gm-clone-20251025-143022`) for easy identification
 
-### Can I run the VMs on a different computer?
+### Can I run the containers/VMs on a different computer?
 
-Yes! Use the built-in export feature:
+Yes! Use the built-in modular export feature:
 
 1. **Export from source machine:**
-   - Choose **Option 3: Manage Base VM** → **"export"**
-   - Creates sanitized archive in `~/Downloads/gm-base-export-YYYYMMDD-HHMMSS.tar.gz`
+   - Choose **Option 3: Manage Base** → **Export VM/Container (for transfer)**
+   - Creates modular export with TWO components:
+     - **Blockchain data:** `~/Downloads/gm-blockchain-YYYYMMDD-HHMMSS/` (split into 1.9GB parts)
+     - **Container/VM image:** `gm-container-image-*.tar.gz`  or `~/Downloads/gm-vm-image-*.tar.gz` (~500MB-1GB)
    - All sensitive data removed (Tor keys, SSH keys, peer databases, logs)
-   - Includes SHA256 checksum for integrity verification
+   - All files SHA256 checksummed for integrity verification
+   - Timestamp-linked for easy reassembly
 
 2. **Transfer to destination machine:**
-   - Copy both `.tar.gz` and `.tar.gz.sha256` files to `~/Downloads/`
-   - Verify integrity: `sha256sum -c gm-base-export-*.tar.gz.sha256`
+   - Copy blockchain directory and image archive to `~/Downloads/`
+   - All checksums are included automatically
 
 3. **Import on destination machine:**
-   - Choose **Option 1: Create Base VM** → **"Import from file"**
+   - Choose **Option 1: Create Base Container/VM** → **"Import from file"**
    - Script will:
      - Scan `~/Downloads/` for export archives
-     - Verify SHA256 checksum automatically
-     - Extract and import the disk image
-     - Handle existing VM/disk cleanup if needed
-     - Configure resources and inject monitoring SSH key
-     - Create the VM (left in stopped state)
+     - Detect modular format (or old monolithic format - both supported)
+     - Verify all SHA256 checksums automatically
+     - Reassemble blockchain if needed
+     - Extract and import the image
+     - Combine blockchain with container/VM
+     - Configure resources and prepare for use
    - If blockchain is >2 hours old, sync monitoring will automatically detect
      and wait for peers to connect and catch up to current height
 
-The export is fully sanitized and will generate fresh Tor keys on first boot.
+**Benefits of modular format:**
+- Smaller image downloads (~1GB vs ~22GB)
+- Blockchain can be reused across multiple exports
+- Can update container/VM without re-transferring blockchain
+- All parts under 2GB (GitHub release compatible)
+
+**Backward compatibility:**
+- Old monolithic exports (`gm-base-export-*.tar.gz`) still work
+- Import system auto-detects format
 
 **Creating GitHub Releases (for maintainers/contributors):**
 
-If you want to share your synced base VM as a GitHub release:
+If you want to share your synced base container/VM as a GitHub release:
 
-1. **Export and split the VM:**
-   ```bash
-   # First, export from the main script (Option 3 → export)
-   # Then run the split script:
-   ./devtools/split-export-for-github.sh
-   ```
-   - Select the export you want to split
-   - Script creates parts <2GB each (GitHub's limit)
-   - Generates checksums and a MANIFEST.txt
+1. **Export from main script:**
+   - Run the main script: `./garbageman-vmm.sh`
+   - For Containers: Choose **"Export Base Container"**
+   - For VMs: Choose **"Export Base VM"**
+   - Select export type:
+     - **Full export (with blockchain)** - Complete package for GitHub releases
+     - Image-only export - For updates without blockchain data
+   - Output: `~/Downloads/gm-export-YYYYMMDD-HHMMSS/`
+   - All files are ready for GitHub release (blockchain split into <2GB parts)
 
 2. **Create a release tag:**
    ```bash
@@ -523,22 +710,21 @@ If you want to share your synced base VM as a GitHub release:
    - Go to https://github.com/paulscode/garbageman-vmm/releases
    - Click "Draft a new release"
    - Select your tag
-   - Upload all files from the split directory:
-     - All `.part*` files
-     - `gm-base-export.tar.gz.sha256`
-     - `MANIFEST.txt`
-   - Add release notes with blockchain height and date
+   - Upload all files from the export directory:
+     - All `gm-blockchain.tar.gz.part*` files (shared between container and VM)
+     - `gm-blockchain.tar.gz.sha256` and `MANIFEST.txt`
+     - `gm-vm-image-*.tar.gz` and checksum (if VM release)
+     - `gm-container-image-*.tar.gz` and checksum (if container release)
+     - `RELEASE-MANIFEST.txt`
+   - Add release notes with blockchain height, date, and modular format benefits
    - Publish!
 
 4. **Users can then import via:**
-   - Option 1: Create Base VM → Import from GitHub
-   - Script downloads all parts, reassembles, verifies, and imports automatically
+   - **Container:** Option 1: Create Base Container → Import from GitHub
+   - **VM:** Option 1: Create Base VM → Import from GitHub
+   - Script downloads blockchain parts + image, verifies checksums, reassembles, and imports automatically
 
-**Manual method (advanced):**
-- Export: `virsh dumpxml gm-base > gm-base.xml`
-- Copy disk: `/var/lib/libvirt/images/gm-base.qcow2`
-- Import on another machine
-- ⚠️ Warning: Manual method does NOT sanitize sensitive data!
+**See RELEASE_GUIDE.md for complete release creation instructions.**
 
 ### What if I run out of resources?
 
@@ -548,17 +734,17 @@ The script prevents over-allocation:
 - Warns if you try to allocate too much
 
 If you need more capacity:
-- Reduce runtime VM sizes in "Configure Defaults"
+- Reduce runtime container/VM sizes in "Configure Defaults"
 - Upgrade your hardware
 - Stop some VMs when not needed
 
-### How do I view a VM's .onion address?
+### How do I view a container's/VM's .onion address?
 
 **Easy way:** Use the menu options:
-- **Option 3: Manage Base VM** - Shows .onion address when the base VM is running (also supports exporting)
-- **Option 5: Manage Clone VMs** - Shows .onion address when you select a running clone
+- **Option 3: Manage Base Container/VM** - Shows .onion address when the base is running (also supports exporting)
+- **Option 5: Manage Clone Containers/VMs** - Shows .onion address when you select a running clone
 
-**Manual way:**
+**Manual way (VMs only):**
 ```bash
 # Get the VM's IP address
 virsh domifaddr gm-base
@@ -568,51 +754,87 @@ ssh root@<VM_IP>
 cat /var/lib/tor/bitcoin-service/hostname
 ```
 
-The .onion address is automatically generated when the VM first boots.
+**Manual way (Containers):**
+```bash
+# For Docker
+docker exec gm-base cat /var/lib/tor/bitcoin-service/hostname
 
-### How do I stop all VMs?
+# For Podman
+podman exec gm-base cat /var/lib/tor/bitcoin-service/hostname
+```
 
-From the terminal:
+The .onion address is automatically generated when the container/VM first boots.
+
+### How do I stop all containers/VMs?
+
+**For Containers:**
+```bash
+# Docker
+docker ps -a                          # List all containers
+docker stop gm-base                   # Graceful shutdown
+docker stop $(docker ps -q -f name=gm)  # Stop all gm containers
+
+# Podman
+podman ps -a                          # List all containers
+podman stop gm-base                   # Graceful shutdown
+podman stop $(podman ps -q -f name=gm)  # Stop all gm containers
+```
+
+**For VMs:**
 ```bash
 virsh list --all                    # List all VMs
 virsh shutdown gm-base              # Graceful shutdown
 virsh destroy gm-base               # Force stop (if needed)
 ```
 
-Or use the "Manage Base VM" menu option.
+Or use the "Manage Base Container/VM" and "Manage Clones" menu options.
 
-### How do I delete a VM?
+### How do I delete a container/VM?
 
-**Base VM and clones are managed separately:**
+**Base container/VM and clones are managed separately:**
 
-**For the Base VM:**
-- Choose **"Manage Base VM"** → **"Delete Base VM"**
-- This permanently removes the base VM and its disk image
-- You'll need to recreate it with "Create Base VM" if you want to make new clones
+**For the Base Container/VM:**
+- Choose **"Manage Base Container/VM"** → **"Delete Base Container/VM"**
+- This permanently removes the base container/VM and its data
+- You'll need to recreate it with "Create Base Container/VM" if you want to make new clones
 - Asks for confirmation before deleting
 
-**For Clone VMs:**
-- Choose **"Manage Clone VMs"** → select the clone → **"Delete VM (permanent)"**
+**For Clone Containers/VMs:**
+- Choose **"Manage Clone Containers/VMs"** → select the clone → **"Delete Container/VM (permanent)"**
 - This only deletes the specific clone you selected
-- Other clones and the base VM remain untouched
+- Other clones and the base remain untouched
 - Asks for confirmation before deleting
 
-**Manual way (clones):**
+**Manual way (container clones):**
+```bash
+# Docker
+docker stop gm-clone-20251103-143022
+docker rm gm-clone-20251103-143022
+docker volume rm gm-clone-20251103-143022-data
+
+# Podman
+podman stop gm-clone-20251103-143022
+podman rm gm-clone-20251103-143022
+podman volume rm gm-clone-20251103-143022-data
+```
+
+**Manual way (VM clones):**
 ```bash
 virsh undefine gm-clone-20251025-143022           # Remove VM definition
 rm /var/lib/libvirt/images/gm-clone-20251025-143022.qcow2  # Delete disk
 ```
 
-**Manual way (base VM):**
+**Manual way (base container/VM):**
 
 Use the included deletion script for thorough removal:
 ```bash
 ./devtools/delete-gm-base.sh
 ```
-This removes the VM, disk image, and associated SSH keys.
+This removes the container/VM, data volumes/disk image, and associated SSH keys.
 
-### Can I access the VM console?
+### Can I access the container/VM console?
 
+**For VMs:**
 Yes! You can access the VM's console directly:
 
 ```bash
@@ -623,13 +845,26 @@ virsh console gm-base
 
 Press `Ctrl+]` to exit the console.
 
-**Note:** The script automatically handles SSH access for monitoring, so you typically don't need console access. But it's available if you want to troubleshoot or explore the VM internally.
+**Security Note:** The default password `garbageman` is only usable via the direct console (virsh console). SSH password authentication is automatically disabled after first-boot, so remote login requires the monitoring SSH key. VMs run on an isolated NAT network (192.168.122.0/24) and are not accessible from external networks.
 
-### How do I check if bitcoind is running inside the VM?
+**For Containers:**
+Use the exec command to get a shell:
 
-**Easy way:** Check the menu options - when a VM is running, Options 3 and 5 show block height (which means bitcoind is running).
+```bash
+# Docker
+docker exec -it gm-base sh
 
-**Manual way:**
+# Podman
+podman exec -it gm-base sh
+```
+
+**Note:** The script automatically handles SSH access for VMs for monitoring, so you typically don't need console access. But it's available if you want to troubleshoot or explore internally.
+
+### How do I check if bitcoind is running inside the container/VM?
+
+**Easy way:** Check the menu options - when a container/VM is running, Options 3 and 5 show block height (which means bitcoind is running).
+
+**Manual way (VMs):**
 ```bash
 # Get the VM's IP address
 virsh domifaddr gm-base
@@ -645,6 +880,17 @@ bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo
 You can also use the monitoring SSH key:
 ```bash
 ssh -i ~/.cache/gm-monitor/gm_monitor_ed25519 root@<VM_IP>
+```
+
+**Manual way (Containers):**
+```bash
+# Docker
+docker exec gm-base ps aux | grep bitcoind
+docker exec gm-base bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo
+
+# Podman
+podman exec gm-base ps aux | grep bitcoind
+podman exec gm-base bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo
 ```
 
 ### What is Garbageman and why does it exist?
@@ -685,15 +931,26 @@ For deeper technical discussion, see:
 
 ## 🐛 Troubleshooting
 
-### VM Won't Start
+### Container/VM Won't Start
 
-**Check libvirt service:**
+**For Containers:**
+```bash
+# Check Docker/Podman status
+sudo systemctl status docker   # or: systemctl status podman
+sudo systemctl start docker    # or: systemctl start podman
+
+# Check container logs
+docker logs gm-base            # or: podman logs gm-base
+```
+
+**For VMs:**
+Check libvirt service:
 ```bash
 sudo systemctl status libvirtd
 sudo systemctl start libvirtd
 ```
 
-**Check default network:**
+Check default network:
 ```bash
 virsh net-list --all
 virsh net-start default
@@ -702,6 +959,20 @@ virsh net-start default
 ### Sync Stuck at 0%
 
 **Verify bitcoind is running:**
+
+**For Containers:**
+```bash
+# Check if container is running
+docker ps | grep gm-base       # or: podman ps | grep gm-base
+
+# Check bitcoind process
+docker exec gm-base ps aux | grep bitcoind
+
+# View logs
+docker exec gm-base tail -f /var/lib/bitcoin/debug.log
+```
+
+**For VMs:**
 ```bash
 # Get VM IP
 virsh domifaddr gm-base
@@ -712,9 +983,13 @@ ps aux | grep bitcoind
 tail -f /var/lib/bitcoin/debug.log
 ```
 
-**Check network connectivity:**
+**Check network connectivity (inside container/VM):**
 ```bash
-# Inside VM
+# For containers
+docker exec gm-base ping -c 3 8.8.8.8
+docker exec gm-base curl https://icanhazip.com
+
+# For VMs (via SSH)
 ping 8.8.8.8
 curl https://icanhazip.com
 ```
@@ -727,6 +1002,16 @@ curl https://icanhazip.com
 - Close other programs and try again
 
 **Clean up and retry:**
+
+**For Containers:**
+```bash
+docker stop gm-base ; docker rm gm-base
+docker volume rm garbageman-data
+docker system prune -f
+./garbageman-vmm.sh  # Start fresh
+```
+
+**For VMs:**
 ```bash
 sudo rm -f /var/lib/libvirt/images/gm-base.qcow2
 virsh undefine gm-base
@@ -735,12 +1020,14 @@ virsh undefine gm-base
 
 ### Can't SSH into VM
 
-**The script handles SSH automatically**, but if you need to manually connect:
+**The script handles SSH automatically for VMs**, but if you need to manually connect:
 
 ```bash
 # Use the monitoring key
 ssh -i ~/.cache/gm-monitor/gm_monitor_ed25519 root@<VM_IP>
 ```
+
+**Note:** SSH is only used for VMs. Containers use `docker exec` or `podman exec` instead.
 
 ---
 
@@ -748,6 +1035,17 @@ ssh -i ~/.cache/gm-monitor/gm_monitor_ed25519 root@<VM_IP>
 
 ### Manual Resource Adjustment
 
+**For Containers:**
+Containers can be adjusted on-the-fly:
+```bash
+# Update CPU/RAM limits (Docker)
+docker update --cpus="2" --memory="4g" gm-base
+
+# Update CPU/RAM limits (Podman)
+podman update --cpus="2" --memory="4g" gm-base
+```
+
+**For VMs:**
 Between Action 1 (Create) and Action 2 (Sync), you can manually adjust VM resources:
 
 ```bash
@@ -770,16 +1068,18 @@ virsh setmem gm-base 8388608 --config
 Customize script behavior before running:
 
 ```bash
-# Use different VM name
-VM_NAME=my-bitcoin-node ./garbageman-vmm.sh
+# Use different base name
+VM_NAME=my-bitcoin-node ./garbageman-vmm.sh           # For VMs
+CONTAINER_NAME=my-bitcoin-node ./garbageman-vmm.sh    # For Containers
 
 # Change default runtime resources
-VM_VCPUS=2 VM_RAM_MB=4096 ./garbageman-vmm.sh
+VM_VCPUS=2 VM_RAM_MB=4096 ./garbageman-vmm.sh                    # For VMs
+CONTAINER_RUNTIME_CPUS=2 CONTAINER_RUNTIME_RAM=4096 ./garbageman-vmm.sh  # For Containers
 
-# Change disk size
+# Change disk size (VMs only, containers use volumes)
 VM_DISK_GB=50 ./garbageman-vmm.sh
 
-# Force Tor-only on base VM
+# Force Tor-only on base container/VM
 CLEARNET_OK=no ./garbageman-vmm.sh
 ```
 
@@ -791,37 +1091,37 @@ GM_BRANCH=my-custom-branch ./garbageman-vmm.sh
 
 ### Diagnostic Tools
 
-If your Base VM isn't starting correctly or bitcoind isn't running, use the diagnostic script to check system health:
+If your Base Container/VM isn't starting correctly or bitcoind isn't running, use the diagnostic script to check system health:
 
 ```bash
 ./devtools/diagnose-gm-base.sh
 ```
 
 **This tool checks:**
-- VM power state and IP address assignment
-- Network connectivity (can VM reach internet?)
-- SSH accessibility with monitoring key
+- Container/VM power state and IP address assignment
+- Network connectivity (can container/VM reach internet?)
+- SSH accessibility with monitoring key (VMs only)
 - Required binaries (bitcoind, bitcoin-cli, tor)
 - Running processes (bitcoind and tor daemons)
-- OpenRC service status (bitcoind and tor services)
+- Service status (systemd for containers, OpenRC for VMs)
 - First-boot completion flag
 - Bitcoin configuration settings
 - Data directory structure and permissions
 - Blockchain sync status (if bitcoind is running)
 
 **When to use it:**
-- VM won't start or keeps shutting down
+- Container/VM won't start or keeps shutting down
 - Action 2 (Monitor Sync) shows errors connecting
-- Action 3 (Manage Base VM) can't gather .onion address or block height
+- Action 3 (Manage Base Container/VM) can't gather .onion address or block height
 - After using `delete-gm-base.sh` to verify clean state
 - Before reporting bugs to confirm system health
 
 **Example output:**
 ```
-[✓] VM is running
-[✓] IP address: 192.168.122.123
+[✓] Container/VM is running
+[✓] IP address: 192.168.122.123 / 172.17.0.2
 [✓] Network connectivity OK
-[✓] SSH access working
+[✓] SSH access working (VMs) / Exec access working (Containers)
 [✓] bitcoind binary found
 [✓] tor binary found
 [✓] bitcoind process running (PID 1234)

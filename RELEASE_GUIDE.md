@@ -1,75 +1,93 @@
 # GitHub Release Guide
 
-This guide explains how to create GitHub releases with pre-synced base VM exports for garbageman-vmm.
+This guide explains how to create GitHub releases with pre-synced base VM and container exports for garbageman-vmm using the **unified export format**.
 
 ## Why Create Releases?
 
 - Let users skip the 24-28 hour blockchain sync
-- Share pre-synced VMs at specific block heights
-- Provide verified, sanitized base VMs for the community
+- Share pre-synced VMs/containers at specific block heights
+- Provide verified, sanitized base deployments for the community
 - Enable quick deployment for new users
+- **NEW:** Smaller downloads with modular exports (blockchain separate from VM/container)
 
 ## Prerequisites
 
-- A fully synced base VM (`gm-base`)
+- A fully synced base VM (`gm-base`) and/or container (`gm-base`)
 - ~25GB free space in `~/Downloads` for export
 - Git access to push tags
 - GitHub account with write access to the repository
 
+## Unified Export System
+
+The unified export system keeps blockchain data and image files together in a single folder:
+
+**Benefits:**
+- Simple folder structure - all files in one place
+- Implementation-agnostic naming (ready for Bitcoin Knots, etc.)
+- Easy to copy entire folder to USB stick
+- All files stay under GitHub's 2GB limit
+- Combined SHA256SUMS file for all assets
+
+**Export Components:**
+1. **Blockchain data** - Split into 1.9GB parts (blockchain.tar.gz.part01, part02, etc.)
+2. **VM or Container image** - Sanitized image without blockchain (~500MB-1GB)
+3. **SHA256SUMS** - Combined checksums for all files
+4. **MANIFEST.txt** - Export metadata and instructions
+
 ## Step-by-Step Process
 
-### 1. Export the Base VM
+### 1. Prepare GitHub Release Files
 
-From the main menu:
+Use the main script's export functionality:
 
+```bash
+./garbageman-vmm.sh
 ```
-Option 3: Manage Base VM → export
-```
 
-This creates:
-- `~/Downloads/gm-base-export-YYYYMMDD-HHMMSS.tar.gz` (~22GB)
-- `~/Downloads/gm-base-export-YYYYMMDD-HHMMSS.tar.gz.sha256` (checksum)
+**For VM releases:**
+- Choose **"Export Base VM"**
+- Select **"Full export (with blockchain)"**
+
+**For Container releases:**
+- Choose **"Export Base Container"**
+- Select **"Full export (with blockchain)"**
+
+**What it does:**
+1. Extracts blockchain data from running VM/container
+2. Splits blockchain into <2GB parts (GitHub-compatible)
+3. Exports sanitized VM/container image without blockchain
+4. Generates combined SHA256SUMS file with all checksums
+5. Creates MANIFEST.txt with metadata
+6. Places everything in unified folder structure
+
+**Output location:**
+```
+~/Downloads/gm-export-YYYYMMDD-HHMMSS/
+  ├── blockchain.tar.gz.part01
+  ├── blockchain.tar.gz.part02
+  ├── blockchain.tar.gz.part03
+  ├── ... (typically 11-12 parts, ~20GB total)
+  ├── vm-image-YYYYMMDD-HHMMSS.tar.gz (~1GB)
+  │   OR
+  ├── container-image-YYYYMMDD-HHMMSS.tar.gz (~500MB)
+  ├── SHA256SUMS (checksums for all files above)
+  └── MANIFEST.txt
+```
 
 **What gets removed during export:**
+- Blockchain data from image (exported separately in parts)
 - Tor hidden service keys (fresh .onion on import)
 - SSH keys (fresh keys generated)
 - Bitcoin peer databases (discovers peers independently)
 - All logs (clean slate)
 
-### 2. Split the Export for GitHub
-
-GitHub has a 2GB file size limit for release assets, so we split the archive:
-
-```bash
-cd /path/to/garbageman-vmm
-./devtools/split-export-for-github.sh
-```
-
-**What it does:**
-1. Scans `~/Downloads` for export archives
-2. Lets you select which one to split
-3. Splits into 1.9GB parts (safely under 2GB limit)
-4. Generates checksums for verification
-5. Creates `MANIFEST.txt` with reassembly instructions
-
-**Output location:**
-```
-~/Downloads/gm-base-export-YYYYMMDD-HHMMSS-github/
-  ├── gm-base-export.tar.gz.part01
-  ├── gm-base-export.tar.gz.part02
-  ├── gm-base-export.tar.gz.part03
-  ├── ... (typically 11-12 parts)
-  ├── gm-base-export.tar.gz.sha256
-  └── MANIFEST.txt
-```
-
-### 3. Create a Git Tag
+### 2. Create a Git Tag
 
 Tags mark specific points in the repository history. Use semantic versioning:
 
 ```bash
-# Get current blockchain height from the VM
-# (shown in "Manage Base VM" menu when VM is running)
+# Get current blockchain height from the VM/container
+# (shown in "Manage Base VM/Container" menu when running)
 
 # Create annotated tag with blockchain info
 git tag -a v1.0.0 -m "Release v1.0.0 - Block height 921348 (2025-10-29)"
@@ -82,13 +100,9 @@ git push origin v1.0.0
 - `v1.0.0` - Major release (significant features)
 - `v1.1.0` - Minor release (updates, improvements)
 - `v1.1.1` - Patch release (bug fixes)
-
-For blockchain exports, you might use:
-- `v1.0.0` - First release at a milestone block height
-- `v1.1.0` - Updated export with newer blocks
 - Date-based: `v2025.10.29` - Export from specific date
 
-### 4. Create GitHub Release
+### 3. Create GitHub Release
 
 1. **Go to releases page:**
    ```
@@ -105,61 +119,111 @@ For blockchain exports, you might use:
 
    **Release title example:**
    ```
-   v1.0.0 - Base VM with Blockchain at Height 921348
+   v1.0.0 - Modular VM + Container with Blockchain at Height 921348
    ```
 
    **Description example:**
    ```markdown
-   ## Pre-Synced Base VM Export
+   ## Pre-Synced Modular Release (NEW FORMAT)
    
-   This release includes a fully synced Garbageman base VM ready for import.
+   This release includes modular exports for both VM and container deployments.
    
    **Blockchain Status:**
    - Block height: 921,348
    - Export date: 2025-10-29
-   - Blockchain size: ~25GB (pruned)
+   - Blockchain size: ~20GB compressed (pruned to 750MB)
    
    **What's Included:**
-   - Alpine Linux 3.18 VM
-   - Bitcoin Knots (Garbageman fork) compiled and configured
-   - Tor configured for .onion connectivity
-   - Fully synced and pruned blockchain
-   - All sensitive data removed (fresh Tor/SSH keys on import)
+   - ✅ Blockchain data (shared between VM and container)
+   - ✅ VM image (~1GB) - Alpine Linux 3.18 + Bitcoin Knots
+   - ✅ Container image (~500MB) - Alpine Linux + Bitcoin Knots
+   - ✅ All files SHA256 checksummed
+   - ✅ Automatic reassembly and import via garbageman-vmm.sh
    
-   **How to Use:**
-   1. Run `garbageman-vmm.sh`
+   **Modular Benefits:**
+   - Smaller downloads (get only what you need)
+   - Blockchain shared between VM and container
+   - Easy to update VM/container without re-downloading blockchain
+   - All files under GitHub's 2GB limit
+   
+   ## How to Use
+   
+   ### Automatic Import (Recommended)
+   
+   **For VM:**
+   1. Run `./garbageman-vmm.sh`
    2. Choose "Create Base VM" → "Import from GitHub"
    3. Select this release
-   4. Script downloads, verifies, and imports automatically (~22GB download)
+   4. Script downloads blockchain + VM image, verifies checksums, and assembles automatically
    
-   **Manual Import:**
-   If you prefer to download manually:
-   1. Download all `.part*` files to a directory
-   2. Download `gm-base-export.tar.gz.sha256`
-   3. Verify: `sha256sum -c gm-base-export.tar.gz.sha256`
-   4. Reassemble: `cat gm-base-export.tar.gz.part* > gm-base-export.tar.gz`
-   5. Move to `~/Downloads/` and import via "Import from file"
+   **For Container:**
+   1. Run `./garbageman-vmm.sh`
+   2. Choose "Create Base Container" → "Import from GitHub"
+   3. Select this release
+   4. Script downloads blockchain + container image, verifies, and assembles automatically
    
-   See `MANIFEST.txt` for detailed instructions.
+   ### Manual Import
+   
+   **Download files:**
+   - For VM: Download all `gm-blockchain.tar.gz.part*` + `gm-vm-image-*.tar.gz`
+   - For Container: Download all `gm-blockchain.tar.gz.part*` + `gm-container-image-*.tar.gz`
+   - Download all `.sha256` checksum files
+   
+   **Verify and reassemble:**
+   ```bash
+   # Verify blockchain parts
+   cd /path/to/downloads
+   sha256sum -c gm-blockchain.tar.gz.sha256
+   
+   # Reassemble blockchain
+   cat gm-blockchain.tar.gz.part* > gm-blockchain.tar.gz
+   
+   # Verify VM/container image
+   sha256sum -c gm-vm-image-*.tar.gz.sha256
+   # or
+   sha256sum -c gm-container-image-*.tar.gz.sha256
+   
+   # Move to Downloads and import
+   mv gm-blockchain-*.tar.gz ~/Downloads/
+   mv gm-vm-image-*.tar.gz ~/Downloads/
+   # or mv gm-container-image-*.tar.gz ~/Downloads/
+   
+   # Import via garbageman-vmm.sh → "Import from file"
+   ```
+   
+   See `RELEASE-MANIFEST.txt` for detailed instructions.
    
    **Checksums:**
-   All parts are checksummed. The import process verifies integrity automatically.
+   All files are SHA256 checksummed. The import process verifies integrity automatically.
    ```
 
 5. **Upload assets:**
 
-   Drag and drop or click to upload all files from the split directory:
-   - `gm-base-export.tar.gz.part01`
-   - `gm-base-export.tar.gz.part02`
-   - `gm-base-export.tar.gz.part03`
-   - ... (all parts)
-   - `gm-base-export.tar.gz.sha256`
+   Drag and drop or click to upload all files from the release directory:
+   
+   **Required files:**
+   - All `gm-blockchain.tar.gz.part*` files (11-12 parts)
+   - `gm-blockchain.tar.gz.sha256`
    - `MANIFEST.txt`
+   - `RELEASE-MANIFEST.txt`
+   
+   **For VM release:**
+   - `gm-vm-image-YYYYMMDD-HHMMSS.tar.gz`
+   - `gm-vm-image-YYYYMMDD-HHMMSS.tar.gz.sha256`
+   
+   **For Container release:**
+   - `gm-container-image-YYYYMMDD-HHMMSS.tar.gz`
+   - `gm-container-image-YYYYMMDD-HHMMSS.tar.gz.sha256`
+   
+   **For Both (recommended):**
+   - Upload all blockchain parts (shared)
+   - Upload both VM and container images
+   - Upload all checksums and manifests
 
    **Upload tips:**
-   - GitHub supports bulk upload
-   - Files must be under 2GB each (our parts are 1.9GB)
-   - Upload can take a while (~22GB total)
+   - GitHub supports bulk upload (drag entire folder)
+   - All files are under 2GB (blockchain parts are 1.9GB each)
+   - Total upload: ~21-22GB for both VM and container
    - Use a stable internet connection
 
 6. **Set as pre-release (optional):**
@@ -170,23 +234,45 @@ For blockchain exports, you might use:
    - Click "Publish release"
    - Release is now public and downloadable
 
-### 5. Verify the Release
+### 4. Verify the Release
 
 After publishing, test the import:
 
+**Test VM import:**
 ```bash
 ./garbageman-vmm.sh
 # Choose: Create Base VM → Import from GitHub
 # Select your new release
-# Verify it downloads and imports correctly
+# Verify it downloads, verifies checksums, and imports correctly
+```
+
+**Test Container import:**
+```bash
+./garbageman-vmm.sh
+# Choose: Create Base Container → Import from GitHub
+# Select your new release
+# Verify container import works correctly
 ```
 
 ## Managing Multiple Releases
 
 - **Keep recent releases:** Maintain 2-3 recent blockchain heights
 - **Delete old releases:** Remove outdated exports to save space
-- **Tag strategy:** Use consistent versioning (date-based or semantic)
+- **Tag strategy:** Use date-based (`v2025.10.29`) or semantic versioning
 - **Release frequency:** Monthly or at significant block milestones
+
+## Creating Image-Only Updates
+
+You can release updated VM/container images without including blockchain data. Users would use blockchain from a previous release:
+
+**From main script:**
+1. Run `./garbageman-vmm.sh`
+2. Choose Export Base VM or Export Base Container
+3. Select **"Image-only export"** instead of full export
+4. Upload just the image file to GitHub release
+5. Document which previous release contains compatible blockchain
+
+**Note:** Users will need to download the image from your new release and blockchain parts from the referenced older release.
 
 ## Troubleshooting
 
@@ -218,12 +304,13 @@ git push origin v1.0.0
 ## Best Practices
 
 1. **Always test exports before releasing:**
-   - Import on a fresh system
+   - Import on a fresh system (both VM and container)
    - Verify blockchain syncs from export point
    - Check Tor connectivity works
+   - Test both automatic and manual import methods
 
 2. **Document blockchain state:**
-   - Include exact block height
+   - Include exact block height in release notes
    - Note export date/time
    - Mention any special configurations
 
@@ -233,60 +320,112 @@ git push origin v1.0.0
    - When major script updates occur
 
 4. **Verify checksums:**
-   - Always include `.sha256` file
-   - Test checksum verification
-   - Document verification steps
+   - Always include `.sha256` files
+   - Test checksum verification yourself
+   - Document verification steps in release notes
 
-5. **Provide fallback options:**
-   - Include manual reassembly instructions
-   - Document "Import from file" method
-   - Offer alternative download methods if needed
+5. **Provide clear instructions:**
+   - Explain unified folder format to users
+   - Document both VM and container import
+   - Include reassembly steps in MANIFEST.txt
+   - Share entire folder for USB transfer use cases
+
+6. **Keep exports organized:**
+   - One export folder per release
+   - All blockchain parts + image + checksums together
+   - Easy to copy entire folder to USB or backup
 
 ## Security Considerations
 
 - **Sanitization is automatic:** Export process removes all sensitive data
-- **Verify checksums:** Users should always verify download integrity
+- **Verify checksums:** Users should always verify download integrity via SHA256SUMS
 - **Fresh keys on import:** Tor and SSH keys regenerate on first boot
 - **No wallet data:** Garbageman doesn't store private keys in the VM
 - **Reproducible:** Users can always build from scratch to verify
 
 ## Example Release Workflow
 
-```bash
-# 1. Export base VM (from main menu)
-# 2. Split for GitHub
-./devtools/split-export-for-github.sh
-# Select the export, parts created in ~/Downloads/gm-base-export-*-github/
+### Full VM Release (Blockchain + Image)
 
-# 3. Create and push tag
-git tag -a v2025.10.29 -m "Release 2025.10.29 - Block 921348"
+```bash
+# 1. Run main script and export
+./garbageman-vmm.sh
+# Choose: Export Base VM
+# Select: Full export (with blockchain)
+
+# Output created in ~/Downloads/gm-export-YYYYMMDD-HHMMSS/
+# Contains: blockchain.tar.gz.part01-XX + vm-image-*.tar.gz + SHA256SUMS + MANIFEST.txt
+
+# 2. Create and push tag
+BLOCK_HEIGHT=921348
+git tag -a v2025.10.29 -m "Release 2025.10.29 - Block $BLOCK_HEIGHT"
 git push origin v2025.10.29
 
-# 4. Create release on GitHub
-# - Go to releases page
-# - Draft new release
+# 3. Create release on GitHub
+# - Go to https://github.com/paulscode/garbageman-vmm/releases
+# - Click "Draft a new release"
 # - Select tag v2025.10.29
-# - Add description with block height
-# - Upload all files from split directory
+# - Add description with block height and format details
+# - Upload ALL files from ~/Downloads/gm-export-YYYYMMDD-HHMMSS/
 # - Publish
 
-# 5. Test
+# 4. Test import
 ./garbageman-vmm.sh
 # Create Base VM → Import from GitHub → Select v2025.10.29
-# Verify import completes successfully
 
-# 6. Announce
+# 5. Announce
 # - Update README if needed
 # - Post to relevant communities
-# - Document any known issues
+```
+
+### Full Container Release
+
+```bash
+# 1. Export container with blockchain
+./garbageman-vmm.sh
+# Choose: Export Base Container
+# Select: Full export (with blockchain)
+
+# 2. Follow same steps as VM release (tag, upload, test)
+```
+
+### Image-Only Update Release
+
+```bash
+# 1. Export just the image
+./garbageman-vmm.sh
+# Choose: Export Base VM (or Container)
+# Select: Image-only export
+
+# 2. Create patch release tag
+git tag -a v2025.10.29.1 -m "VM update - uses v2025.10.29 blockchain"
+git push origin v2025.10.29.1
+
+# 3. Create release on GitHub
+# - Draft new release for v2025.10.29.1
+# - Note: "Image update only - use blockchain from v2025.10.29"
+# - Upload only the image file and its checksum
+# - Users download this + blockchain parts from v2025.10.29
 ```
 
 ## Questions?
 
 - **How often to release?** Monthly or when >1000 blocks behind
-- **What to name tags?** Date-based (`v2025.10.29`) or semantic (`v1.2.0`)
+- **What to name tags?** Date-based (`v2025.10.29`) recommended for clarity
 - **Delete old releases?** Keep last 2-3, delete older ones
 - **Pre-release vs release?** Use pre-release for testing, regular for stable
+- **VM or container or both?** Create separate releases for each (different tags)
+- **Can I update image without new blockchain?** Yes! Use image-only export
+- **What if GitHub changes?** Unified format makes it easy to host elsewhere or share via USB
+
+## Migration from Old Format
+
+If you have existing monolithic releases (`gm-base-export-*.tar.gz`):
+
+1. **Keep old releases** - They still work with import system (backward compatible)
+2. **New releases use modular format** - Smaller, more flexible
+3. **Document format change** - In release notes, explain modular benefits
+4. **Gradual transition** - Users will naturally move to modular as they update
 
 ## Resources
 

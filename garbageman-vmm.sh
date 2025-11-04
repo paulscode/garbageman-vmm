@@ -1,38 +1,57 @@
 #!/usr/bin/env bash
 ################################################################################
-# garbageman-vmm.sh — All-in-one TUI for Garbageman VM lifecycle
+# garbageman-vmm.sh — All-in-one TUI for Garbageman lifecycle management
+#                     Supports both VMs and Containers
 #                     Tested on Linux Mint 22.2 (Ubuntu 24.04 base)
 #
 # Purpose:
 #   Automate the creation and management of Bitcoin Garbageman nodes running
-#   in lightweight Alpine Linux VMs. This script handles everything from
-#   building the Bitcoin fork, creating base VMs, monitoring IBD sync, to
-#   cloning multiple nodes each with their own Tor v3 onion address.
+#   in either lightweight Alpine Linux VMs OR Docker/Podman containers.
+#   This script handles everything from building the Bitcoin fork, creating
+#   base VMs/containers, monitoring IBD sync, to cloning multiple nodes each
+#   with their own Tor v3 onion address.
 #
 # Features:
-#   - Build Garbageman (a Bitcoin Knots fork) INSIDE Alpine VM (native musl)
-#   - Create a tiny Alpine Linux VM (headless, unattended) for the base node
+#   - Deployment mode selection: VMs (libvirt/qemu) OR Containers (Docker/Podman)
+#   - Build Garbageman (a Bitcoin Knots fork) INSIDE Alpine (native musl)
 #   - Pre-creation "Configure defaults" step:
-#       * Host reserve policy (cores/RAM kept for desktop)
-#       * Per-VM runtime resources (vCPUs/RAM) for base after sync + all clones
-#       * Toggle: "Allow clearnet peers on one VM?" (YES => base is Tor+clearnet; clones remain Tor-only)
-#   - Start & monitor IBD with a dialog progress UI (Stop on demand; auto-downsize base VM after sync)
-#   - Clone the base VM any number of times; each clone:
+#       * Host reserve policy (cores/RAM/disk kept for desktop)
+#       * Per-VM/container runtime resources (vCPUs/RAM) for base after sync + all clones
+#       * Toggle: "Allow clearnet peers on one VM/container?" (YES => base is Tor+clearnet; clones remain Tor-only)
+#   - Start & monitor IBD with live progress display (Stop on demand; auto-downsize after sync)
+#   - Clone the base VM/container any number of times; each clone:
 #       * gets a fresh Tor v3 onion address
 #       * is forced to Tor-only networking (privacy-preserving)
-#   - Host-aware suggestions (vCPU/RAM for initial sync & clone capacity) with fixed reserve policy
+#       * copies blockchain data from base (no re-sync needed)
+#   - Host-aware capacity detection (CPU/RAM/Disk) with intelligent clone suggestions
+#   - Import/export for easy transfer between hosts
 #
 # Architecture Notes:
-#   - Host uses glibc (Ubuntu/Mint), VMs use musl (Alpine) - binaries are NOT compatible
-#   - Solution: Build Garbageman INSIDE Alpine using virt-customize
-#   - libguestfs creates temporary VMs for build operations
-#   - Uses libvirt/qemu-kvm for VM management
-#   - OpenRC init system in Alpine (not systemd)
+#   VM Mode:
+#     - Host uses glibc (Ubuntu/Mint), VMs use musl (Alpine) - binaries are NOT compatible
+#     - Solution: Build Garbageman INSIDE Alpine using virt-customize
+#     - libguestfs creates temporary VMs for build operations
+#     - Uses libvirt/qemu-kvm for VM management
+#     - OpenRC init system in Alpine (not systemd)
+#   
+#   Container Mode:
+#     - Multi-stage Dockerfile builds Garbageman from source in Alpine
+#     - Supports both Docker and Podman (auto-detected)
+#     - Lower overhead than VMs (~150MB vs ~200MB)
+#     - Faster startup and cloning than VMs
+#     - Data stored in Docker/Podman volumes (survives container recreation)
 #
 # Requirements:
-#   - libvirt/qemu-kvm on the host (script auto-installs if missing)
-#   - Build tools: cmake, gcc, etc. (auto-installed)
-#   - TUI tools: whiptail, dialog, jq (auto-installed)
+#   VM Mode:
+#     - libvirt/qemu-kvm on the host (script auto-installs if missing)
+#     - Build tools: libguestfs-tools (auto-installed)
+#   
+#   Container Mode:
+#     - Docker OR Podman (script auto-detects which is available)
+#     - No special privileges needed beyond container runtime access
+#   
+#   Both Modes:
+#     - TUI tools: whiptail, dialog, jq (auto-installed)
 ################################################################################
 set -euo pipefail
 
@@ -89,11 +108,28 @@ CLONE_PREFIX="${CLONE_PREFIX:-gm-clone}" # Prefix for clone VM names (e.g., gm-c
 # These reserves keep resources available for your desktop/host OS
 RESERVE_CORES="${RESERVE_CORES:-2}"      # keep at least 2 cores for host desktop
 RESERVE_RAM_MB="${RESERVE_RAM_MB:-4096}" # keep at least 4 GiB for host desktop
+RESERVE_DISK_GB="${RESERVE_DISK_GB:-20}" # keep at least 20 GB free disk space for host
+
+# Disk space requirements per VM/container
+# VMs: ~25GB each (pruned blockchain + overhead)
+# Containers: ~25GB each (same as VMs, shared image reduces initial size)
+VM_DISK_SPACE_GB="${VM_DISK_SPACE_GB:-25}"           # Disk space per VM (GB)
+CONTAINER_DISK_SPACE_GB="${CONTAINER_DISK_SPACE_GB:-25}"  # Disk space per container (GB)
 
 # Clearnet toggle: "Allow clearnet peers on one VM?"
 # If "yes", base VM uses Tor+clearnet for better connectivity during IBD
 # Clones are ALWAYS Tor-only regardless of this setting (privacy-first)
 CLEARNET_OK="${CLEARNET_OK:-yes}"        # "yes" or "no"
+
+# Deployment mode: "vm" or "container"
+# Automatically detected based on existence of gm-base VM or container
+# Only prompts user if neither exists
+DEPLOYMENT_MODE=""                       # Set by check_deployment_mode()
+
+# Container configuration
+CONTAINER_NAME="${CONTAINER_NAME:-gm-base}"           # Base container name
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-garbageman-base}" # Container image name
+CONTAINER_CLONE_PREFIX="${CONTAINER_CLONE_PREFIX:-gm-clone}" # Prefix for clone containers
 ################################################################################
 
 ################################################################################
@@ -251,8 +287,183 @@ ensure_vm_stopped(){
 
 
 ################################################################################
+# Container Runtime Detection & Utilities
+################################################################################
+
+# container_runtime: Detect and return the available container runtime
+# Returns: "docker" or "podman" (whichever is available), empty if neither found
+# Purpose: Support both Docker and Podman for maximum compatibility
+container_runtime(){
+  if command -v docker >/dev/null 2>&1; then
+    echo "docker"
+  elif command -v podman >/dev/null 2>&1; then
+    echo "podman"
+  else
+    echo ""
+  fi
+}
+
+# container_cmd: Wrapper for container runtime commands
+# Args: $@ = container command and arguments
+# Purpose: Abstracts Docker vs Podman differences
+container_cmd(){
+  local runtime
+  runtime=$(container_runtime)
+  [[ -n "$runtime" ]] || die "No container runtime found. This should not happen - ensure_tools should have installed Docker."
+  
+  # Use sudo for docker if current user isn't in docker group
+  if [[ "$runtime" == "docker" ]]; then
+    if groups | grep -qw docker; then
+      docker "$@"
+    else
+      sudo docker "$@"
+    fi
+  else
+    # Podman runs rootless by default
+    podman "$@"
+  fi
+}
+
+# container_exists: Check if a container exists
+# Args: $1 = container name
+# Returns: 0 if exists, 1 if not
+# Note: Returns 1 (false) if no container runtime is available (instead of dying)
+container_exists(){
+  local name="$1"
+  local runtime
+  runtime=$(container_runtime)
+  # If no container runtime available, container doesn't exist
+  [[ -n "$runtime" ]] || return 1
+  container_cmd ps -a --format '{{.Names}}' | grep -q "^${name}$"
+}
+
+# container_state: Get the current state of a container
+# Args: $1 = container name
+# Returns: State string ("running", "exited", "paused", etc.)
+container_state(){
+  local name="$1"
+  if ! container_exists "$name"; then
+    echo "not-found"
+    return
+  fi
+  container_cmd ps -a --filter "name=^${name}$" --format '{{.Status}}' | awk '{print $1}' | tr '[:upper:]' '[:lower:]'
+}
+
+# container_ip: Get the IP address of a running container
+# Args: $1 = container name
+# Returns: IP address string (empty if not found or not running)
+container_ip(){
+  local name="$1"
+  local state
+  state=$(container_state "$name")
+  
+  [[ "$state" == "up" ]] || return 0
+  
+  # Try to get IP from container inspect
+  container_cmd inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" 2>/dev/null | head -n1
+}
+
+# container_exec: Execute command inside a running container
+# Args: $1 = container name, $@ = command to run
+# Purpose: Similar to SSH for VMs, but using container exec
+container_exec(){
+  local name="$1"
+  shift
+  container_cmd exec "$name" "$@"
+}
+
+# ensure_container_stopped: Ensure a container is fully stopped before operations
+# Args: $1 = container name
+# Returns: 0 on success, 1 on failure
+# Note: Uses 180s timeout for graceful bitcoind shutdown, waits up to 200s total
+ensure_container_stopped(){
+  local name="$1"
+  local state
+  state=$(container_state "$name")
+  
+  # If not found or already stopped, nothing to do
+  [[ "$state" == "not-found" || "$state" == "exited" ]] && return 0
+  
+  echo "Stopping container '$name' (graceful shutdown, may take up to 3 minutes)..."
+  container_cmd stop --time=180 "$name" >/dev/null 2>&1 || true
+  
+  # Wait up to 200 seconds (180s timeout + 20s buffer) for graceful stop
+  for i in {1..200}; do
+    state=$(container_state "$name")
+    [[ "$state" == "exited" ]] && return 0
+    sleep 1
+  done
+  
+  # If still running, force kill
+  echo "Graceful stop timed out; forcing kill..."
+  container_cmd kill "$name" >/dev/null 2>&1 || true
+  sleep 2
+  
+  state=$(container_state "$name")
+  [[ "$state" == "exited" ]] && return 0
+  
+  echo "❌ Failed to stop container '$name'"
+  return 1
+}
+
+
+################################################################################
 # Host Package Installation
 ################################################################################
+
+# install_docker: Install Docker CE from official Docker repository
+# Purpose: Install Docker when neither Docker nor Podman is available
+# Side effects:
+#   - Adds Docker's official GPG key and repository
+#   - Installs docker-ce, docker-ce-cli, containerd.io
+#   - Starts and enables docker service
+#   - Adds current user to docker group (may require logout to take effect)
+install_docker() {
+  echo "Installing Docker CE (requires sudo)..."
+  
+  # Install prerequisites
+  sudo apt-get update
+  sudo apt-get install -y ca-certificates curl gnupg
+  
+  # Add Docker's official GPG key
+  sudo install -m 0755 -d /etc/apt/keyrings
+  if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+  fi
+  
+  # Add Docker repository (using Ubuntu 24.04 "noble" - Linux Mint 22.2 base)
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+    noble stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  
+  # Install Docker Engine
+  sudo apt-get update
+  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  
+  # Start and enable Docker service
+  sudo systemctl enable --now docker
+  
+  # Add current user to docker group
+  local current_user="${SUDO_USER:-$USER}"
+  sudo usermod -aG docker "$current_user"
+  echo "Added user '$current_user' to docker group."
+  echo ""
+  echo "Important: Group membership changes require one of the following:"
+  echo "  1. Log out and log back in (recommended for permanent effect)"
+  echo "  2. Run this script with: sg docker -c './garbageman-vmm.sh'"
+  echo "  3. Continue with this session (will use sudo for docker operations)"
+  echo ""
+  
+  # Verify installation
+  if command -v docker >/dev/null 2>&1; then
+    echo "✓ Docker installed successfully"
+  else
+    echo "❌ Docker installation may have failed"
+    return 1
+  fi
+}
 
 # install_deps: Install all required host packages
 # Purpose: Ensures build tools, libvirt/qemu, and TUI tools are present
@@ -352,11 +563,21 @@ EOF
 
 # ensure_tools: Check for required commands and install if missing
 # Purpose: Lazy installation - only installs packages when needed
+# Also ensures a container runtime (Docker or Podman) is available
 ensure_tools(){
   for t in virsh virt-install virt-clone virt-customize virt-copy-in virt-builder guestfish jq curl git cmake; do
     cmd "$t" || install_deps
   done
   cmd dialog || sudo apt-get install -y dialog whiptail
+  
+  # Check for container runtime and install Docker if neither exists
+  if [[ -z "$(container_runtime)" ]]; then
+    echo ""
+    echo "No container runtime detected (Docker or Podman)."
+    echo "Installing Docker CE for container support..."
+    echo ""
+    install_docker || die "Failed to install Docker. Please install docker or podman manually."
+  fi
   
   # Ensure the default network is available after tools are installed
   ensure_default_network || true
@@ -401,29 +622,40 @@ check_libvirt_access(){
 ################################################################################
 # Host Resource Detection & Capacity Suggestions
 ################################################################################
-# The script detects host resources and suggests VM allocations based on:
-#   - Total host CPU/RAM
+# The script detects host resources and suggests VM/container allocations based on:
+#   - Total host CPU/RAM/Disk
 #   - User-configured reserves (for host OS/desktop)
-#   - VM runtime sizes (for long-term operation)
-# Suggestions are recomputed whenever reserves or VM sizes change.
+#   - VM/container runtime sizes (for long-term operation)
+#   - Available disk space on storage path
+# Suggestions are recomputed whenever reserves or VM/container sizes change.
+# Capacity is limited by whichever resource (CPU/RAM/Disk) is most constrained.
 
 # Global variables for host resource tracking
 HOST_CORES=0                    # Total CPU cores on host
 HOST_RAM_MB=0                   # Total RAM on host (MiB)
+HOST_DISK_GB=0                  # Available disk space on storage path (GB)
 AVAIL_CORES=0                   # Available cores after reserves
 AVAIL_RAM_MB=0                  # Available RAM after reserves (MiB)
+AVAIL_DISK_GB=0                 # Available disk after reserves (GB)
 HOST_SUGGEST_SYNC_VCPUS="$SYNC_VCPUS_DEFAULT"   # Suggested vCPUs for initial IBD
 HOST_SUGGEST_SYNC_RAM_MB="$SYNC_RAM_MB_DEFAULT" # Suggested RAM for initial IBD (MiB)
 HOST_SUGGEST_CLONES=0           # Suggested number of clones (in addition to base)
 HOST_RES_SUMMARY=""             # Formatted summary string for display
 
-# detect_host_resources: Discover host resources and compute suggestions
+# detect_host_resources: Discover host resources and compute VM capacity suggestions
 # Purpose: Called before any resource-related UI to show current capacity
 # Side effects: Updates all HOST_* global variables
+# Note: For VMs only - containers use detect_host_resources_container()
 detect_host_resources(){
   # Discover total host cores and RAM (MiB)
   HOST_CORES="$(nproc --all 2>/dev/null || echo 1)"
   HOST_RAM_MB="$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 1024)"
+
+  # Discover disk space for VM storage path
+  local vm_disk_path="/var/lib/libvirt/images"
+  local disk_avail_kb
+  disk_avail_kb=$(df -k "$vm_disk_path" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+  HOST_DISK_GB=$((disk_avail_kb / 1048576))  # Convert KB to GB
 
   # Budget after fixed reserves (editable via Configure Defaults)
   AVAIL_CORES=$(( HOST_CORES - RESERVE_CORES ))
@@ -431,6 +663,9 @@ detect_host_resources(){
 
   AVAIL_RAM_MB=$(( HOST_RAM_MB - RESERVE_RAM_MB ))
   (( AVAIL_RAM_MB < 0 )) && AVAIL_RAM_MB=0
+
+  AVAIL_DISK_GB=$(( HOST_DISK_GB - RESERVE_DISK_GB ))
+  (( AVAIL_DISK_GB < 0 )) && AVAIL_DISK_GB=0
 
   # Initial sync suggestion: use ALL available resources for fast IBD
   # (clamped to sensible minimums)
@@ -444,16 +679,28 @@ detect_host_resources(){
 
   # Post-sync simultaneous capacity (base + clones) given runtime VM sizes
   # This calculates how many VMs can run simultaneously after IBD completes
-  local cpu_capacity=0 mem_capacity=0 total_vm_capacity=0
+  # Account for hypervisor overhead (~200MB per VM for QEMU process, page tables, etc.)
+  local cpu_capacity=0 mem_capacity=0 disk_capacity=0 total_vm_capacity=0
   if (( VM_VCPUS > 0 )); then
     cpu_capacity=$(( AVAIL_CORES / VM_VCPUS ))
   fi
-  if (( VM_RAM_MB > 0 )); then
-    mem_capacity=$(( AVAIL_RAM_MB / VM_RAM_MB ))
+  
+  # Account for hypervisor overhead in memory calculation
+  local vm_overhead_mb=200
+  local effective_ram_per_vm=$((VM_RAM_MB + vm_overhead_mb))
+  if (( effective_ram_per_vm > 0 )); then
+    mem_capacity=$(( AVAIL_RAM_MB / effective_ram_per_vm ))
   fi
-  # Take the smaller of CPU or memory capacity (whichever is more constrained)
+  
+  # Account for disk space (each VM needs VM_DISK_SPACE_GB)
+  if (( VM_DISK_SPACE_GB > 0 )); then
+    disk_capacity=$(( AVAIL_DISK_GB / VM_DISK_SPACE_GB ))
+  fi
+  
+  # Take the smallest of CPU, memory, or disk capacity (most constrained resource)
   total_vm_capacity="$cpu_capacity"
   (( mem_capacity < total_vm_capacity )) && total_vm_capacity="$mem_capacity"
+  (( disk_capacity < total_vm_capacity )) && total_vm_capacity="$disk_capacity"
   (( total_vm_capacity < 0 )) && total_vm_capacity=0
 
   # We suggest clones = total capacity - 1 (leaving one slot for the base)
@@ -467,22 +714,144 @@ detect_host_resources(){
 Detected host:
   - CPU cores: ${HOST_CORES}
   - RAM: ${HOST_RAM_MB} MiB
+  - Disk: ${HOST_DISK_GB} GB available ($vm_disk_path)
 
 Reserves to keep for the host:
   - CPU cores reserved: ${RESERVE_CORES}
   - RAM reserved: ${RESERVE_RAM_MB} MiB
+  - Disk reserved: ${RESERVE_DISK_GB} GB
 
 Available for VMs (after reserve):
   - CPU cores: ${AVAIL_CORES}
   - RAM: ${AVAIL_RAM_MB} MiB
+  - Disk: ${AVAIL_DISK_GB} GB
 
 Suggested INITIAL SYNC (base VM only):
   - vCPUs: ${HOST_SUGGEST_SYNC_VCPUS}
   - RAM:   ${HOST_SUGGEST_SYNC_RAM_MB} MiB
 
-Post-sync runtime (each VM uses vCPUs=${VM_VCPUS}, RAM=${VM_RAM_MB} MiB):
-  - Estimated total VMs possible simultaneously: ${total_vm_capacity}
+Post-sync runtime (each VM uses vCPUs=${VM_VCPUS}, RAM=${VM_RAM_MB} MiB, Disk=${VM_DISK_SPACE_GB} GB):
+  - CPU capacity: ${cpu_capacity} VMs
+  - RAM capacity: ${mem_capacity} VMs
+  - Disk capacity: ${disk_capacity} VMs
+  - Estimated total VMs possible simultaneously: ${total_vm_capacity} (limited by $(
+      if (( total_vm_capacity == cpu_capacity )); then echo "CPU"
+      elif (( total_vm_capacity == mem_capacity )); then echo "RAM"
+      elif (( total_vm_capacity == disk_capacity )); then echo "Disk"
+      else echo "resources"; fi
+    ))
   - Suggested number of clones (besides base): ${HOST_SUGGEST_CLONES}
+TXT
+  )
+}
+
+# detect_host_resources_container: Container-specific capacity detection
+# Purpose: Calculate container capacity considering CPU/RAM/Disk constraints
+# Side effects: Updates all HOST_* global variables
+# Note: Uses same per-container CPU/RAM as VMs for consistency (1 CPU, 2GB RAM by default)
+#       Container overhead (~150MB) is lower than VM overhead (~200MB)
+#       Disk detection checks Docker/Podman storage paths
+detect_host_resources_container(){
+  # Discover total host cores and RAM (MiB)
+  HOST_CORES="$(nproc --all 2>/dev/null || echo 1)"
+  HOST_RAM_MB="$(awk '/MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 1024)"
+
+  # Discover disk space for container storage path
+  local container_disk_path="/var/lib/docker"
+  [[ -d "/var/lib/podman" ]] && container_disk_path="/var/lib/podman"
+  local disk_avail_kb
+  disk_avail_kb=$(df -k "$container_disk_path" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+  HOST_DISK_GB=$((disk_avail_kb / 1048576))  # Convert KB to GB
+
+  # Budget after fixed reserves (editable via Configure Defaults)
+  # For containers, we can use slightly lower reserves since there's no hypervisor
+  AVAIL_CORES=$(( HOST_CORES - RESERVE_CORES ))
+  (( AVAIL_CORES < 0 )) && AVAIL_CORES=0
+
+  AVAIL_RAM_MB=$(( HOST_RAM_MB - RESERVE_RAM_MB ))
+  (( AVAIL_RAM_MB < 0 )) && AVAIL_RAM_MB=0
+
+  AVAIL_DISK_GB=$(( HOST_DISK_GB - RESERVE_DISK_GB ))
+  (( AVAIL_DISK_GB < 0 )) && AVAIL_DISK_GB=0
+
+  # Initial sync suggestion: use ALL available resources for fast IBD
+  local svcpus="$AVAIL_CORES"
+  (( svcpus < 1 )) && svcpus=1
+  HOST_SUGGEST_SYNC_VCPUS="$svcpus"
+
+  local sram="$AVAIL_RAM_MB"
+  (( sram < 2048 )) && sram=2048   # Minimum 2GB for IBD
+  HOST_SUGGEST_SYNC_RAM_MB="$sram"
+
+  # Post-sync simultaneous capacity (base + clones) given runtime container sizes
+  # Containers have lower overhead (~150MB) than VMs (~200MB) but we use
+  # the same per-container CPU/RAM allocation for consistency
+  local cpu_capacity=0 mem_capacity=0 disk_capacity=0 total_container_capacity=0
+  
+  # For CPUs: Can be fractional (e.g., 0.5, 1.0, 2.0)
+  if (( $(echo "$VM_VCPUS > 0" | bc -l) )); then
+    cpu_capacity=$(echo "$AVAIL_CORES / $VM_VCPUS" | bc)
+  fi
+  
+  # For RAM: Account for lower container overhead (~150MB per container)
+  local container_overhead_mb=150
+  local effective_ram_per_container=$((VM_RAM_MB + container_overhead_mb))
+  if (( effective_ram_per_container > 0 )); then
+    mem_capacity=$(( AVAIL_RAM_MB / effective_ram_per_container ))
+  fi
+  
+  # For Disk: Account for disk space (each container needs CONTAINER_DISK_SPACE_GB)
+  if (( CONTAINER_DISK_SPACE_GB > 0 )); then
+    disk_capacity=$(( AVAIL_DISK_GB / CONTAINER_DISK_SPACE_GB ))
+  fi
+  
+  # Take the smallest of CPU, memory, or disk capacity (most constrained resource)
+  total_container_capacity="$cpu_capacity"
+  (( mem_capacity < total_container_capacity )) && total_container_capacity="$mem_capacity"
+  (( disk_capacity < total_container_capacity )) && total_container_capacity="$disk_capacity"
+  (( total_container_capacity < 0 )) && total_container_capacity=0
+
+  # We suggest clones = total capacity - 1 (leaving one slot for the base)
+  HOST_SUGGEST_CLONES=$(( total_container_capacity > 0 ? total_container_capacity - 1 : 0 ))
+  (( HOST_SUGGEST_CLONES < 0 )) && HOST_SUGGEST_CLONES=0
+  (( HOST_SUGGEST_CLONES > 48 )) && HOST_SUGGEST_CLONES=48  # UI sanity limit
+
+  # Format summary string for display in menus
+  HOST_RES_SUMMARY=$(
+    cat <<TXT
+Detected host:
+  - CPU cores: ${HOST_CORES}
+  - RAM: ${HOST_RAM_MB} MiB
+  - Disk: ${HOST_DISK_GB} GB available ($container_disk_path)
+
+Reserves to keep for the host:
+  - CPU cores reserved: ${RESERVE_CORES}
+  - RAM reserved: ${RESERVE_RAM_MB} MiB
+  - Disk reserved: ${RESERVE_DISK_GB} GB
+
+Available for containers (after reserve):
+  - CPU cores: ${AVAIL_CORES}
+  - RAM: ${AVAIL_RAM_MB} MiB
+  - Disk: ${AVAIL_DISK_GB} GB
+
+Suggested INITIAL SYNC (base container only):
+  - CPUs: ${HOST_SUGGEST_SYNC_VCPUS}
+  - RAM:  ${HOST_SUGGEST_SYNC_RAM_MB} MiB
+
+Post-sync runtime (each container uses CPUs=${VM_VCPUS}, RAM=${VM_RAM_MB} MiB, Disk=${CONTAINER_DISK_SPACE_GB} GB):
+  - CPU capacity: ${cpu_capacity} containers
+  - RAM capacity: ${mem_capacity} containers
+  - Disk capacity: ${disk_capacity} containers
+  - Estimated total containers possible simultaneously: ${total_container_capacity} (limited by $(
+      if (( total_container_capacity == cpu_capacity )); then echo "CPU"
+      elif (( total_container_capacity == mem_capacity )); then echo "RAM"
+      elif (( total_container_capacity == disk_capacity )); then echo "Disk"
+      else echo "resources"; fi
+    ))
+  - Suggested number of clones (besides base): ${HOST_SUGGEST_CLONES}
+
+Note: Containers use the same CPU/RAM allocation as VMs for consistency.
+Lower overhead (~150MB vs ~200MB) may allow more containers on the same hardware.
 TXT
   )
 }
@@ -499,13 +868,17 @@ show_capacity_suggestions(){
 # Configure Defaults (Interactive UI)
 ################################################################################
 
-# configure_defaults: Interactive menu to reset or edit reserves, VM sizes, and clearnet option
+# configure_defaults: Interactive menu to edit reserves, VM/container sizes, and clearnet option
 # Purpose: Allows users to reset to original host-aware defaults or tune resource allocation manually
 # Options:
-#   1. Reset to Original Values - Sets hardcoded defaults (2 cores, 4GB reserve, 1 vCPU, 2GB RAM per VM)
+#   1. Reset to Original Values - Sets hardcoded defaults:
+#      - Host reserves: 2 cores, 4GB RAM, 20GB disk
+#      - Per-VM/container: 1 vCPU, 2GB RAM, 25GB disk
+#      - Clearnet: Yes (base only, clones always Tor-only)
 #   2. Choose Custom Values - Interactive prompts for each setting
 # Returns: 0 on success (changes saved), 1 on cancel
-# Side effects: Updates global variables (RESERVE_*, VM_*, CLEARNET_OK)
+# Side effects: Updates global variables (RESERVE_*, VM_*, CONTAINER_*, CLEARNET_OK)
+#               Triggers detect_host_resources to recalculate capacity
 configure_defaults(){
   detect_host_resources
 
@@ -701,6 +1074,120 @@ Post-sync capacity estimate:
   Suggested clones alongside the base: ${HOST_SUGGEST_CLONES}"
 
   whiptail --title "Confirm Defaults" --yesno "$confirm_text" 22 78 || return 1
+  return 0
+}
+
+# configure_defaults_container: Container-specific configuration prompts
+# Purpose: Same as configure_defaults_direct but with container-appropriate wording
+# Note: Containers have lower overhead than VMs, so defaults can be more generous
+configure_defaults_container(){
+  detect_host_resources_container
+
+  # 1) Edit numeric defaults via individual inputbox prompts
+  local _rc _rram _vcpus _vram
+  
+  # Get reserve cores
+  _rc=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nReserve cores for host:" \
+    12 60 "$RESERVE_CORES" 3>&1 1>&2 2>&3) || return 1
+  
+  # Get reserve RAM
+  _rram=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nReserve RAM for host (MiB):" \
+    12 60 "$RESERVE_RAM_MB" 3>&1 1>&2 2>&3) || return 1
+  
+  # Get runtime container CPU limit (used after IBD and for all clones)
+  # Note: Containers use --cpus flag (decimal value), not vCPUs
+  _vcpus=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nRuntime container CPUs (per container after sync):\n(e.g., 1.0 = 1 full CPU, 0.5 = 50% of 1 CPU)" \
+    14 60 "$VM_VCPUS" 3>&1 1>&2 2>&3) || return 1
+  
+  # Get runtime container RAM (used after IBD and for all clones)
+  _vram=$(whiptail --title "Configure Defaults" --inputbox \
+    "Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\n\nRuntime container RAM (MiB per container after sync):" \
+    14 60 "$VM_RAM_MB" 3>&1 1>&2 2>&3) || return 1
+
+  # Validate
+  [[ "$_rc" =~ ^[0-9]+$ ]]    || die "Reserve cores must be a non-negative integer."
+  [[ "$_rram" =~ ^[0-9]+$ ]]  || die "Reserve RAM must be a non-negative integer."
+  [[ "$_vcpus" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Runtime container CPUs must be a positive number (can be decimal)."
+  [[ "$_vram" =~ ^[0-9]+$ ]]  || die "Runtime container RAM must be a positive integer."
+  (( $(echo "$_vcpus >= 0.5" | bc -l) )) || die "Runtime container CPUs must be at least 0.5."
+  (( _vram >= 512 )) || die "Runtime container RAM should be at least 512 MiB."
+
+  # Apply edits
+  RESERVE_CORES="$_rc"
+  RESERVE_RAM_MB="$_rram"
+  VM_VCPUS="$_vcpus"
+  VM_RAM_MB="$_vram"
+
+  # 2) Toggle clearnet option via radiolist
+  local status_yes status_no
+  status_yes="ON"; status_no="OFF"
+  [[ "${CLEARNET_OK,,}" == "no" ]] && { status_yes="OFF"; status_no="ON"; }
+  local choice
+  choice=$(whiptail --title "Allow clearnet peers on base container?" --radiolist \
+    "If enabled, the BASE CONTAINER (only) will use Tor + clearnet.\nClones are forced to Tor-only regardless." \
+    15 78 2 \
+    "yes" "" "$status_yes" \
+    "no"  "" "$status_no" \
+    3>&1 1>&2 2>&3) || return 1
+  CLEARNET_OK="$choice"
+
+  # Recompute suggestions & show confirmation summary
+  detect_host_resources_container
+  local confirm_text="Please confirm these settings:\n
+Reserves (host keeps):     ${RESERVE_CORES} cores, ${RESERVE_RAM_MB} MiB RAM
+Runtime per container:     ${VM_VCPUS} CPU(s), ${VM_RAM_MB} MiB RAM
+Clearnet on base:          ${CLEARNET_OK}
+
+Host totals:               ${HOST_CORES} cores, ${HOST_RAM_MB} MiB
+Available after reserve:   ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB
+
+Initial sync suggestion:
+  CPUs=${HOST_SUGGEST_SYNC_VCPUS}, RAM=${HOST_SUGGEST_SYNC_RAM_MB} MiB
+
+Post-sync capacity estimate:
+  Suggested clones alongside the base: ${HOST_SUGGEST_CLONES}
+  
+Note: Containers use the same CPU/RAM allocation as VMs for consistency.
+Lower overhead may allow running more containers on the same hardware."
+
+  whiptail --title "Confirm Defaults" --yesno "$confirm_text" 24 78 || return 1
+  return 0
+}
+
+# prompt_sync_resources_container: Container-specific sync resource prompts
+# Purpose: Same as prompt_sync_resources but with container-appropriate wording
+prompt_sync_resources_container(){
+  detect_host_resources_container
+
+  # Abort early if insufficient resources
+  if (( AVAIL_CORES < 1 || AVAIL_RAM_MB < 2048 )); then
+    die "Insufficient resources.\n\nHost: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB\nReserves: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB\nAvailable: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB\n\nNeed at least 1 core + 2048 MiB after reserve to create the base container."
+  fi
+
+  local banner="Host: ${HOST_CORES} cores, ${HOST_RAM_MB} MiB
+Reserve kept: ${RESERVE_CORES} cores, ${RESERVE_RAM_MB} MiB
+Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
+
+  local svcpus sram
+  svcpus=$(whiptail --title "Initial Sync CPUs" --inputbox \
+    "${banner}\n\nHow many CPUs for INITIAL sync (base container only)?\n\nMore CPUs = faster blockchain download & validation.\nSuggestion: ${HOST_SUGGEST_SYNC_VCPUS} (use all available)\n\nNote: After sync completes, will downsize to ${VM_VCPUS} CPUs.\nEnter CPU count:" \
+    20 78 "${HOST_SUGGEST_SYNC_VCPUS}" 3>&1 1>&2 2>&3) || return 1
+  [[ "$svcpus" =~ ^[0-9]+$ ]] || die "CPUs must be a positive integer."
+  [[ "$svcpus" -ge 1 ]] || die "CPUs must be at least 1."
+  (( svcpus <= AVAIL_CORES )) || die "Requested CPUs ($svcpus) exceeds available after reserve (${AVAIL_CORES})."
+
+  sram=$(whiptail --title "Initial Sync RAM (MiB)" --inputbox \
+    "${banner}\n\nHow much RAM for INITIAL sync (base container only)?\n\nMore RAM = faster sync (dbcache, more connections).\nSuggestion: ${HOST_SUGGEST_SYNC_RAM_MB} MiB (use all available)\n\nNote: After sync completes, will downsize to ${VM_RAM_MB} MiB.\nEnter RAM in MiB:" \
+    20 78 "${HOST_SUGGEST_SYNC_RAM_MB}" 3>&1 1>&2 2>&3) || return 1
+  [[ "$sram" =~ ^[0-9]+$ ]] || die "RAM must be a positive integer."
+  [[ "$sram" -ge 2048 ]] || die "RAM should be at least 2048 MiB for IBD."
+  (( sram <= AVAIL_RAM_MB )) || die "Requested RAM ($sram MiB) exceeds available after reserve (${AVAIL_RAM_MB} MiB)."
+
+  SYNC_VCPUS="$svcpus"
+  SYNC_RAM_MB="$sram"
   return 0
 }
 
@@ -1196,10 +1683,21 @@ GUESTEOF
 # Args: $1 = IP address, $@ = command to run
 # Purpose: Connect to VMs for monitoring without password prompts
 # Note: Uses temporary SSH key injected by ensure_monitor_ssh()
+#       Automatically removes stale host keys to avoid conflicts when VMs are recreated
 gssh(){
   local ip="$1"; shift
-  ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile="$SSH_KEY_DIR/known_hosts" \
-      -o ConnectTimeout=5 -p "$SSH_PORT" "${SSH_USER}@${ip}" "$@"
+  
+  # Remove any existing host key for this IP to avoid conflicts when VMs are recreated
+  # This is safe for our use case since we control both ends and use key-based auth
+  ssh-keygen -f "$SSH_KEY_DIR/known_hosts" -R "$ip" >/dev/null 2>&1 || true
+  
+  ssh -i "$SSH_KEY_PATH" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile="$SSH_KEY_DIR/known_hosts" \
+      -o LogLevel=ERROR \
+      -o ConnectTimeout=5 \
+      -p "$SSH_PORT" \
+      "${SSH_USER}@${ip}" "$@"
 }
 
 
@@ -1300,6 +1798,7 @@ create_alpine_image_alternative(){
   echo "Creating minimal Alpine image with kernel..."
   
   local tmpd; tmpd="$(mktemp -d -p /var/tmp)"
+  trap "rm -rf '$tmpd'" RETURN EXIT INT TERM
   chmod 755 "$tmpd"
   
   # Download Alpine mini root filesystem
@@ -1479,16 +1978,23 @@ chown bitcoin:bitcoin /var/lib/bitcoin /etc/bitcoin
 echo "$(date): Setting ownership of bitcoin binaries" >> /var/log/first-boot.log
 chown bitcoin:bitcoin /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli 2>> /var/log/first-boot.log
 
-# Enable root login temporarily
-echo "$(date): Configuring SSH" >> /var/log/first-boot.log
+# Enable root login temporarily for first-boot setup
+echo "\$(date): Configuring SSH for first boot" >> /var/log/first-boot.log
 sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
 echo 'root:garbageman' | chpasswd
 
 # Start SSH service
 service sshd start || /etc/init.d/sshd start || {
-  echo "$(date): Starting sshd manually" >> /var/log/first-boot.log
+  echo "\$(date): Starting sshd manually" >> /var/log/first-boot.log
   /usr/sbin/sshd -D &
 }
+
+# After SSH is running and host can connect, disable password authentication
+echo "\$(date): Securing SSH (disabling password auth)" >> /var/log/first-boot.log
+sleep 3  # Brief delay to ensure SSH is fully started
+sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config || echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+service sshd reload 2>/dev/null || /etc/init.d/sshd reload 2>/dev/null || pkill -HUP sshd
 
 # Test network connectivity
 echo "$(date): Testing network connectivity" >> /var/log/first-boot.log
@@ -1804,23 +2310,28 @@ Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
 # Import Base VM
 ################################################################################
 
-# import_base_vm: Import base VM from exported archive
+# import_base_vm: Import base VM from exported archive (supports old & new formats)
 # Purpose: Alternative to building from scratch - imports sanitized export
-# Flow:
-#   1. Scan ~/Downloads for gm-base-export-* archives
-#   2. Let user select one
-#   3. Verify SHA256 checksum
-#   4. Extract archive and read metadata
-#   5. Check for existing VM/disk and handle cleanup if needed
-#   6. Copy disk image to /var/lib/libvirt/images/
-#   7. Configure resource allocation
-#   8. Inject monitoring SSH key directly into disk (before VM creation)
-#   9. Create libvirt domain with virt-install --import
-#  10. Stop the auto-started VM (ready for manual startup)
+# Supported inputs:
+#   - NEW unified export folder: gm-export-YYYYMMDD-HHMMSS/
+#     • May contain VM and/or container image archives plus blockchain parts
+#     • This function uses the VM image; if only a container image is found, user is guided to the container import
+#   - OLD monolithic archive: gm-base-export-YYYYMMDD-HHMMSS.tar.gz (VM + blockchain)
+#   - OLD modular VM image:   gm-vm-image-YYYYMMDD-HHMMSS.tar.gz (VM only)
+# Flow (new unified folder):
+#   1. Let user configure defaults (reserves, VM sizes, clearnet toggle)
+#   2. Scan ~/Downloads for gm-export-* folders
+#   3. Let user select which export to import
+#   4. Prefer VM image; if missing but container image present, show helpful guidance
+#   5. Verify checksums (SHA256SUMS or per-file .sha256)
+#   6. Extract VM archive, detect expected files (vm-disk.qcow2, *.xml)
+#   7. If blockchain parts present, reassemble/extract and inject into VM disk
+#   8. Copy disk image to /var/lib/libvirt/images/ and define VM
+# Notes:
+#   - Folder detection is flexible: either image type triggers listing in menu
+#   - Cross-guidance helps users pick the correct import path (VM vs container)
 # Prerequisites: Same as create_base_vm (ensures tools installed)
 # Side effects: Creates VM disk at /var/lib/libvirt/images/${VM_NAME}.qcow2
-# Note: If importing stale blockchain (>2h old), sync monitoring will detect
-#       and wait for peers to connect and catch up to current block height
 import_base_vm(){
   # Start sudo keepalive for potential long operations
   sudo_keepalive_start force
@@ -1831,62 +2342,144 @@ import_base_vm(){
   check_libvirt_access
 
   # Scan for export archives in ~/Downloads
-  echo "Scanning ~/Downloads for export archives..."
-  local archives=()
-  local archive_list=""
+  echo "Scanning ~/Downloads for VM exports..."
+  local export_items=()
   
+  # Look for NEW unified export folders (gm-export-*)
+  while IFS= read -r -d '' folder; do
+    # Check if it contains a VM image archive OR container image archive
+    # This allows importing from folders that have either or both image types
+    if ls "$folder"/gm-vm-image-*.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/vm-image-*.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/container-image-*.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/gm-container-image-*.tar.gz >/dev/null 2>&1; then
+      export_items+=("folder:$folder")
+    fi
+  done < <(find "$HOME/Downloads" -maxdepth 1 -type d -name "gm-export-*" -print0 2>/dev/null | sort -z)
+  
+  # Look for OLD format archives (.tar.gz files)
   while IFS= read -r -d '' archive; do
-    archives+=("$archive")
-    local basename=$(basename "$archive")
-    local size=$(du -h "$archive" | cut -f1)
-    archive_list="${archive_list}${basename} (${size})\n"
-  done < <(find "$HOME/Downloads" -maxdepth 1 -name "gm-base-export-*.tar.gz" -print0 2>/dev/null | sort -z)
+    export_items+=("file:$archive")
+  done < <(find "$HOME/Downloads" -maxdepth 1 -type f \( -name "gm-base-export-*.tar.gz" -o -name "gm-vm-image-*.tar.gz" \) -print0 2>/dev/null | sort -z)
   
-  if [[ ${#archives[@]} -eq 0 ]]; then
-    pause "No export archives found in ~/Downloads.\n\nLooking for files matching: gm-base-export-*.tar.gz"
+  if [[ ${#export_items[@]} -eq 0 ]]; then
+    pause "No VM exports found in ~/Downloads.\n\nLooking for:\n  gm-export-* folders with VM or container images\n  gm-base-export-*.tar.gz (old format)\n  gm-vm-image-*.tar.gz (old modular format)"
     return
   fi
   
-  echo "Found ${#archives[@]} export archive(s)"
+  echo "Found ${#export_items[@]} export(s)"
   
   # Build menu options for whiptail
   local menu_items=()
-  for i in "${!archives[@]}"; do
-    local archive="${archives[$i]}"
-    local basename=$(basename "$archive")
-    local size=$(du -h "$archive" | cut -f1)
-    local timestamp=$(echo "$basename" | sed 's/gm-base-export-\(.*\)\.tar\.gz/\1/')
-    menu_items+=("$i" "${timestamp} (${size})")
+  for i in "${!export_items[@]}"; do
+    local item="${export_items[$i]}"
+    local type="${item%%:*}"
+    local path="${item#*:}"
+    local basename=$(basename "$path")
+    local display
+    
+    if [[ "$type" == "folder" ]]; then
+      local folder_size=$(du -sh "$path" 2>/dev/null | cut -f1)
+      local timestamp=$(echo "$basename" | sed 's/gm-export-\(.*\)/\1/')
+      
+      # Check if blockchain data is present
+      local blockchain_status="blockchain included"
+      if ! ls "$path"/blockchain.tar.gz.part* >/dev/null 2>&1 && \
+         ! ls "$path"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+        blockchain_status="image only, no blockchain"
+      fi
+      
+      display="${timestamp} (${folder_size}) [${blockchain_status}]"
+    else
+      local file_size=$(du -h "$path" | cut -f1)
+      local timestamp=$(echo "$basename" | sed -E 's/gm-(base-export|vm-image)-(.*)\.tar\.gz/\2/')
+      
+      # Old archives likely have blockchain included (monolithic format)
+      # Modular image-only archives are rare for old format
+      local blockchain_status="blockchain included"
+      if [[ "$basename" =~ vm-image ]]; then
+        blockchain_status="image only, no blockchain"
+      fi
+      
+      display="${timestamp} (${file_size}) [${blockchain_status}]"
+    fi
+    
+    menu_items+=("$i" "$display")
   done
   
-  # Let user select archive
+  # Let user select export
   local selection
-  selection=$(whiptail --title "Select Export Archive" \
-    --menu "Choose an export archive to import:\n\nFound in: ~/Downloads" \
+  selection=$(whiptail --title "Select VM Export" \
+    --menu "Choose an export to import:\n\nFound in: ~/Downloads" \
     20 78 10 \
     "${menu_items[@]}" \
     3>&1 1>&2 2>&3) || return
   
-  local selected_archive="${archives[$selection]}"
-  local selected_basename=$(basename "$selected_archive")
+  local selected_item="${export_items[$selection]}"
+  local item_type="${selected_item%%:*}"
+  local item_path="${selected_item#*:}"
+  local selected_basename=$(basename "$item_path")
   
   echo ""
   echo "Selected: $selected_basename"
   
-  # Check for SHA256 checksum file
-  local checksum_file="${selected_archive}.sha256"
-  if [[ ! -f "$checksum_file" ]]; then
-    pause "❌ Checksum file not found: ${selected_basename}.sha256\n\nCannot verify integrity. Import aborted."
-    return
-  fi
-  
-  echo "Checksum file found: ${selected_basename}.sha256"
-  
-  # Verify checksum
-  echo "Verifying SHA256 checksum..."
-  if ! (cd "$HOME/Downloads" && sha256sum -c "$selected_basename.sha256" 2>&1 | grep -q "OK"); then
-    pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
-    return
+  # Verify checksum (different handling for folder vs file)
+  if [[ "$item_type" == "folder" ]]; then
+    # NEW format: SHA256SUMS file inside the folder
+    local checksum_file="$item_path/SHA256SUMS"
+    
+    if [[ ! -f "$checksum_file" ]]; then
+      # Try old format with individual .sha256 file
+      local vm_archive=$(ls "$item_path"/vm-image-*.tar.gz 2>/dev/null | head -n1)
+      if [[ -z "$vm_archive" ]]; then
+        vm_archive=$(ls "$item_path"/gm-vm-image-*.tar.gz 2>/dev/null | head -n1)
+      fi
+      local vm_basename=$(basename "$vm_archive")
+      checksum_file="$item_path/${vm_basename}.sha256"
+      
+      if [[ ! -f "$checksum_file" ]]; then
+        pause "❌ Checksum file not found\n\nCannot verify integrity. Import aborted."
+        return
+      fi
+    fi
+    
+    echo "Checksum file found"
+    echo "Verifying SHA256 checksums..."
+    
+    # Verify using SHA256SUMS or individual file
+    if [[ -f "$item_path/SHA256SUMS" ]]; then
+      # Verify VM image archive checksum from SHA256SUMS
+      local vm_archive=$(ls "$item_path"/vm-image-*.tar.gz 2>/dev/null | head -n1)
+      if [[ -z "$vm_archive" ]]; then
+        vm_archive=$(ls "$item_path"/gm-vm-image-*.tar.gz 2>/dev/null | head -n1)
+      fi
+      local vm_basename=$(basename "$vm_archive")
+      
+      if ! (cd "$item_path" && grep "$vm_basename" SHA256SUMS | sha256sum -c 2>&1 | grep -q "OK"); then
+        pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
+        return
+      fi
+    else
+      # Old format with individual checksum file
+      if ! (cd "$item_path" && sha256sum -c "$(basename "$checksum_file")" 2>&1 | grep -q "OK"); then
+        pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
+        return
+      fi
+    fi
+  else
+    # OLD format: checksum is sibling to archive file
+    local checksum_file="${item_path}.sha256"
+    if [[ ! -f "$checksum_file" ]]; then
+      pause "❌ Checksum file not found: ${selected_basename}.sha256\n\nCannot verify integrity. Import aborted."
+      return
+    fi
+    
+    echo "Checksum file found: ${selected_basename}.sha256"
+    echo "Verifying SHA256 checksum..."
+    if ! (cd "$HOME/Downloads" && sha256sum -c "$selected_basename.sha256" 2>&1 | grep -q "OK"); then
+      pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
+      return
+    fi
   fi
   
   echo "✅ Checksum verified successfully"
@@ -1909,37 +2502,92 @@ import_base_vm(){
   local temp_extract_dir="$HOME/.cache/gm-import-temp-$$"
   mkdir -p "$temp_extract_dir"
   
-  # Extract archive
-  echo "[1/5] Extracting archive (this may take a few minutes)..."
-  if ! tar -xzf "$selected_archive" -C "$temp_extract_dir"; then
-    rm -rf "$temp_extract_dir"
-    pause "❌ Failed to extract archive"
-    return
-  fi
+  local extract_dir
+  local blockchain_dir
   
-  # Find the extracted directory (should be gm-base-export-YYYYMMDD-HHMMSS)
-  local extract_dir=$(find "$temp_extract_dir" -maxdepth 1 -type d -name "gm-base-export-*" | head -n1)
-  if [[ -z "$extract_dir" ]]; then
-    rm -rf "$temp_extract_dir"
-    pause "❌ Could not find extracted directory in archive"
-    return
+  if [[ "$item_type" == "folder" ]]; then
+    # NEW unified format: use folder directly
+    echo "[1/7] Using unified export folder..."
+    extract_dir="$item_path"
+    
+    # Extract the VM archive within the folder (new or old naming)
+    local vm_archive=$(ls "$extract_dir"/vm-image-*.tar.gz 2>/dev/null | head -n1)
+    if [[ -z "$vm_archive" ]]; then
+      # Try old naming
+      vm_archive=$(ls "$extract_dir"/gm-vm-image-*.tar.gz 2>/dev/null | head -n1)
+    fi
+    
+    if [[ -z "$vm_archive" ]]; then
+      # Check if folder has container image instead
+      if ls "$extract_dir"/container-image-*.tar.gz >/dev/null 2>&1 || ls "$extract_dir"/gm-container-image-*.tar.gz >/dev/null 2>&1; then
+        rm -rf "$temp_extract_dir"
+        pause "❌ This folder only contains a container image.\n\nTo import as a container:\n1. Cancel and return to main menu\n2. Choose 'Create Base Container'\n3. Select 'Import from file'\n4. Choose this same folder\n\nOr download/export a VM image for this release."
+        return
+      else
+        rm -rf "$temp_extract_dir"
+        pause "❌ No VM image archive found in export folder"
+        return
+      fi
+    fi
+    
+    echo "    Extracting VM image archive..."
+    tar -xzf "$vm_archive" -C "$temp_extract_dir" || {
+      rm -rf "$temp_extract_dir"
+      pause "❌ Failed to extract VM image archive"
+      return
+    }
+    
+    # Blockchain parts are at root level in new format
+    blockchain_dir="$extract_dir"
+    
+    extract_dir="$temp_extract_dir"  # Point to extracted VM files
+    
+  else
+    # OLD format: extract the tar.gz archive
+    echo "[1/7] Extracting archive (this may take a few minutes)..."
+    if ! tar -xzf "$item_path" -C "$temp_extract_dir"; then
+      rm -rf "$temp_extract_dir"
+      pause "❌ Failed to extract archive"
+      return
+    fi
+    
+    # Find the extracted directory 
+    extract_dir=$(find "$temp_extract_dir" -maxdepth 1 -type d \( -name "gm-base-export-*" -o -name "gm-vm-image-*" \) | head -n1)
+    if [[ -z "$extract_dir" ]]; then
+      rm -rf "$temp_extract_dir"
+      pause "❌ Could not find extracted directory in archive"
+      return
+    fi
   fi
   
   echo "    ✓ Archive extracted"
   
-  # Verify disk image exists
-  local source_disk="${extract_dir}/gm-base.qcow2"
-  if [[ ! -f "$source_disk" ]]; then
+  # Verify disk image exists (handle both old and new formats)
+  local source_disk=""
+  if [[ -f "${extract_dir}/gm-base.qcow2" ]]; then
+    source_disk="${extract_dir}/gm-base.qcow2"  # Old format
+  elif [[ -f "${extract_dir}/vm-disk.qcow2" ]]; then
+    source_disk="${extract_dir}/vm-disk.qcow2"  # New format
+  fi
+  
+  if [[ -z "$source_disk" ]]; then
     rm -rf "$temp_extract_dir"
-    pause "❌ Disk image not found in archive: gm-base.qcow2"
+    pause "❌ Disk image not found in archive (expected gm-base.qcow2 or vm-disk.qcow2)"
     return
   fi
   
   # Read metadata if available
   local metadata_file="${extract_dir}/metadata.json"
+  local has_modular_blockchain=false
+  
+  # Check if blockchain data is present in the folder
+  if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1 || ls "$blockchain_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+    has_modular_blockchain=true
+  fi
+  
   if [[ -f "$metadata_file" ]]; then
     echo ""
-    echo "[2/5] Reading metadata..."
+    echo "[2/7] Reading metadata..."
     local export_date script_name blockchain_height
     export_date=$(jq -r '.export_date // "unknown"' "$metadata_file" 2>/dev/null || echo "unknown")
     script_name=$(jq -r '.script_name // "unknown"' "$metadata_file" 2>/dev/null || echo "unknown")
@@ -1949,11 +2597,25 @@ import_base_vm(){
     echo "    Script: $script_name"
     echo "    Blockchain height at export: $blockchain_height"
     echo "    ✓ Metadata read"
+  elif [[ "$has_modular_blockchain" == "false" ]] && ([[ -f "${extract_dir}/vm-disk.qcow2" ]] || [[ -f "${extract_dir}/README.txt" ]]); then
+    # Modular format detected, but no blockchain data present
+    echo ""
+    echo "[2/7] Detected VM image without blockchain data"
+    echo "    ⚠ This folder contains ONLY the VM image"
+    echo "    ⚠ Blockchain data is NOT included and will need to be synced (24-28 hours)"
+    echo ""
+    if ! whiptail --title "Image-Only Import" \
+      --yesno "This folder contains ONLY the VM image.\n\nBlockchain data is NOT included and will need to be synced.\n\nFor faster setup with blockchain included:\n• Use 'Import from GitHub' option instead\n• Or download a matching blockchain export to the same folder\n\nContinue with image-only import?" \
+      16 75; then
+      rm -rf "$temp_extract_dir"
+      pause "Import cancelled."
+      return
+    fi
   fi
   
   # Copy disk image to libvirt images directory
   echo ""
-  echo "[3/5] Copying disk image to /var/lib/libvirt/images/..."
+  echo "[3/7] Copying disk image to /var/lib/libvirt/images/..."
   local dest_disk="/var/lib/libvirt/images/${VM_NAME}.qcow2"
   
   # Check if VM domain already exists
@@ -2008,12 +2670,303 @@ import_base_vm(){
   sudo chmod 644 "$dest_disk"
   echo "    ✓ Disk image copied"
   
+  # [4/7] Configure bitcoin.conf based on CLEARNET_OK setting
+  echo ""
+  echo "[4/7] Configuring bitcoin.conf based on clearnet setting..."
+  
+  local btc_conf_content
+  if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+    echo "    Configuring for: Tor + clearnet (faster sync)"
+    btc_conf_content="server=1
+daemon=1
+prune=750
+dbcache=450
+maxconnections=25
+
+# Tor configuration
+proxy=127.0.0.1:9050
+listen=1
+bind=127.0.0.1
+
+# Allow both Tor and clearnet
+onlynet=onion
+onlynet=ipv4
+listenonion=1
+discover=1
+dnsseed=1
+torcontrol=127.0.0.1:9051
+
+[main]"
+  else
+    echo "    Configuring for: Tor-only (maximum privacy)"
+    btc_conf_content="server=1
+daemon=1
+prune=750
+dbcache=450
+maxconnections=25
+
+# Tor-only configuration
+proxy=127.0.0.1:9050
+listen=1
+bind=127.0.0.1
+onlynet=onion
+listenonion=1
+discover=0
+dnsseed=0
+torcontrol=127.0.0.1:9051
+
+[main]"
+  fi
+  
+  # Write bitcoin.conf to VM disk
+  sudo virt-customize -a "$dest_disk" --no-selinux-relabel \
+    --write /etc/bitcoin/bitcoin.conf:"$btc_conf_content" \
+    --run-command "chown bitcoin:bitcoin /etc/bitcoin/bitcoin.conf || true" \
+    --run-command "chmod 640 /etc/bitcoin/bitcoin.conf" \
+    2>&1 | grep -v "random seed" >&2
+  
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "    ⚠️  Warning: Failed to configure bitcoin.conf (will use default from image)"
+  else
+    echo "    ✓ bitcoin.conf configured"
+  fi
+  
+  # [5/7] Import blockchain data if available
+  if [[ -n "$blockchain_dir" && -d "$blockchain_dir" ]]; then
+    echo ""
+    echo "[5/7] Importing blockchain data..."
+    
+    # Clean up any old failed temp directories first
+    if ls ~/.cache/gm-blockchain-temp-* >/dev/null 2>&1; then
+      echo "  Cleaning up old temp directories from previous failed imports..."
+      rm -rf ~/.cache/gm-blockchain-temp-*
+    fi
+    
+    # Check for new naming (blockchain.tar.gz.part*)
+    if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
+      echo "  Found blockchain data in unified export folder..."
+      echo "  Reassembling blockchain parts..."
+      
+      local blockchain_temp="$HOME/.cache/gm-blockchain-temp-$$"
+      mkdir -p "$blockchain_temp"
+      
+      if ! cat "$blockchain_dir"/blockchain.tar.gz.part* > "$blockchain_temp/blockchain.tar.gz"; then
+        rm -rf "$blockchain_temp"
+        echo "    ✗ Failed to reassemble blockchain parts"
+        echo "  ℹ No blockchain data imported - you'll need to sync from scratch"
+      else
+        echo "    ✓ Blockchain parts reassembled"
+        local reassembled_size=$(du -h "$blockchain_temp/blockchain.tar.gz" | cut -f1)
+        echo "      Size: $reassembled_size"
+        
+        # Verify checksum if available (check SHA256SUMS file)
+        if [[ -f "$blockchain_dir/SHA256SUMS" ]]; then
+          echo "  Verifying blockchain checksum..."
+          local expected_sum=$(grep "blockchain.tar.gz$" "$blockchain_dir/SHA256SUMS" | awk '{print $1}')
+          local actual_sum=$(sha256sum "$blockchain_temp/blockchain.tar.gz" | awk '{print $1}')
+          echo "    Expected: $expected_sum"
+          echo "    Actual:   $actual_sum"
+          
+          if [[ "$expected_sum" != "$actual_sum" ]]; then
+            rm -rf "$blockchain_temp"
+            echo "    ✗ Blockchain checksum mismatch!"
+            echo "  ℹ No blockchain data imported - you'll need to sync from scratch"
+          else
+            echo "    ✓ Checksum verified"
+            
+            # Inject blockchain into VM disk
+            echo "  Injecting blockchain into VM disk..."
+            echo "  Decompressing blockchain archive..."
+            if ! gunzip "$blockchain_temp/blockchain.tar.gz"; then
+              echo "    ✗ Failed to decompress blockchain"
+              rm -rf "$blockchain_temp"
+            else
+              echo "    ✓ Blockchain decompressed"
+              local tar_file="$blockchain_temp/blockchain.tar"
+              
+              # Capture full error output
+              local inject_output
+              inject_output=$(sudo virt-tar-in -a "$dest_disk" "$tar_file" /var/lib/bitcoin 2>&1)
+              local inject_status=$?
+              
+              # Filter out benign warnings
+              local filtered_output=$(echo "$inject_output" | grep -v "random seed")
+              
+              if [[ $inject_status -eq 0 ]]; then
+                echo "    ✓ Blockchain data imported successfully into /var/lib/bitcoin"
+                
+                # Fix ownership - tar preserves UIDs which may not match the new VM's bitcoin user
+                echo "    Fixing ownership of blockchain files..."
+                sudo virt-customize -a "$dest_disk" --no-selinux-relabel \
+                  --run-command "chown -R bitcoin:bitcoin /var/lib/bitcoin" \
+                  2>&1 | grep -v "random seed" >&2
+                
+                if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+                  echo "    ✓ Ownership fixed"
+                else
+                  echo "    ⚠ Warning: Could not fix ownership (bitcoind may fail to start)"
+                fi
+                
+                rm -rf "$blockchain_temp"
+              else
+                echo "    ✗ Failed to inject blockchain into VM (exit code: $inject_status)"
+                if [[ -n "$filtered_output" ]]; then
+                  echo "    Error output:"
+                  echo "$filtered_output" | sed 's/^/      /'
+                fi
+                # Don't remove temp dir so we can investigate
+              fi
+            fi
+          fi
+        else
+          echo "    ⚠ No checksum file found - skipping blockchain import"
+          rm -rf "$blockchain_temp"
+        fi
+      fi
+      
+    # OLD format with gm- prefix
+    elif ls "$blockchain_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+      echo "  Found blockchain data (old naming)..."
+      echo "  Reassembling blockchain parts..."
+      
+      local blockchain_temp="$HOME/.cache/gm-blockchain-temp-$$"
+      mkdir -p "$blockchain_temp"
+      
+      cat "$blockchain_dir"/gm-blockchain.tar.gz.part* > "$blockchain_temp/gm-blockchain.tar.gz" || {
+        rm -rf "$blockchain_temp"
+        echo "    ⚠ Failed to reassemble blockchain - continuing without it"
+      }
+      
+      # Verify checksum if available
+      if [[ -f "$blockchain_dir/gm-blockchain.tar.gz.sha256" ]]; then
+        echo "  Verifying blockchain checksum..."
+        local expected_sum=$(grep "gm-blockchain.tar.gz$" "$blockchain_dir/gm-blockchain.tar.gz.sha256" | awk '{print $1}')
+        local actual_sum=$(sha256sum "$blockchain_temp/gm-blockchain.tar.gz" | awk '{print $1}')
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+          rm -rf "$blockchain_temp"
+          echo "    ⚠ Blockchain checksum mismatch - continuing without it"
+        else
+          echo "    ✓ Checksum verified"
+          
+          # Inject blockchain into VM disk
+          echo "  Injecting blockchain into VM disk..."
+          echo "  Decompressing blockchain archive..."
+          if ! gunzip "$blockchain_temp/gm-blockchain.tar.gz"; then
+            echo "    ✗ Failed to decompress blockchain"
+            rm -rf "$blockchain_temp"
+          else
+            echo "    ✓ Blockchain decompressed"
+            local tar_file="$blockchain_temp/gm-blockchain.tar"
+            
+            # Capture full error output
+            local inject_output
+            inject_output=$(sudo virt-tar-in -a "$dest_disk" "$tar_file" /var/lib/bitcoin 2>&1)
+            local inject_status=$?
+            
+            # Filter out benign warnings
+            local filtered_output=$(echo "$inject_output" | grep -v "random seed")
+            
+            if [[ $inject_status -eq 0 ]]; then
+              echo "    ✓ Blockchain data imported successfully into /var/lib/bitcoin"
+              
+              # Fix ownership - tar preserves UIDs which may not match the new VM's bitcoin user
+              echo "    Fixing ownership of blockchain files..."
+              sudo virt-customize -a "$dest_disk" --no-selinux-relabel \
+                --run-command "chown -R bitcoin:bitcoin /var/lib/bitcoin" \
+                2>&1 | grep -v "random seed" >&2
+              
+              if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+                echo "    ✓ Ownership fixed"
+              else
+                echo "    ⚠ Warning: Could not fix ownership (bitcoind may fail to start)"
+              fi
+              
+              rm -rf "$blockchain_temp"
+            else
+              echo "    ✗ Failed to inject blockchain into VM (exit code: $inject_status)"
+              if [[ -n "$filtered_output" ]]; then
+                echo "    Error output:"
+                echo "$filtered_output" | sed 's/^/      /'
+              fi
+              # Don't remove temp dir so we can investigate
+            fi
+          fi
+        fi
+      else
+        echo "    ⚠ No checksum file found - skipping blockchain import"
+        rm -rf "$blockchain_temp"
+      fi
+    fi
+  elif [[ -f "$extract_dir/blockchain-data.tar.gz" ]]; then
+    # OLD monolithic format with blockchain included
+    echo ""
+    echo "[5/7] Importing blockchain data (monolithic format)..."
+    echo "  Found blockchain data in archive..."
+    
+    # Clean up any old failed temp directories first
+    if ls ~/.cache/gm-blockchain-temp-* >/dev/null 2>&1; then
+      echo "  Cleaning up old temp directories from previous failed imports..."
+      rm -rf ~/.cache/gm-blockchain-temp-*
+    fi
+    
+    echo "  Decompressing blockchain archive..."
+    
+    local blockchain_temp="$HOME/.cache/gm-blockchain-temp-$$"
+    mkdir -p "$blockchain_temp"
+    cp "$extract_dir/blockchain-data.tar.gz" "$blockchain_temp/"
+    
+    if ! gunzip "$blockchain_temp/blockchain-data.tar.gz"; then
+      echo "    ✗ Failed to decompress blockchain"
+      rm -rf "$blockchain_temp"
+    else
+      echo "    ✓ Blockchain decompressed"
+      local tar_file="$blockchain_temp/blockchain-data.tar"
+      
+      # Capture full error output
+      local inject_output
+      inject_output=$(sudo virt-tar-in -a "$dest_disk" "$tar_file" /var/lib/bitcoin 2>&1)
+      local inject_status=$?
+      
+      # Filter out benign warnings
+      local filtered_output=$(echo "$inject_output" | grep -v "random seed")
+      
+      if [[ $inject_status -eq 0 ]]; then
+        echo "    ✓ Blockchain data imported successfully into /var/lib/bitcoin"
+        
+        # Fix ownership - tar preserves UIDs which may not match the new VM's bitcoin user
+        echo "    Fixing ownership of blockchain files..."
+        sudo virt-customize -a "$dest_disk" --no-selinux-relabel \
+          --run-command "chown -R bitcoin:bitcoin /var/lib/bitcoin" \
+          2>&1 | grep -v "random seed" >&2
+        
+        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+          echo "    ✓ Ownership fixed"
+        else
+          echo "    ⚠ Warning: Could not fix ownership (bitcoind may fail to start)"
+        fi
+        
+        rm -rf "$blockchain_temp"
+      else
+        echo "    ✗ Failed to inject blockchain into VM (exit code: $inject_status)"
+        if [[ -n "$filtered_output" ]]; then
+          echo "    Error output:"
+          echo "$filtered_output" | sed 's/^/      /'
+        fi
+        # Don't remove temp dir so we can investigate
+      fi
+    fi
+  else
+    echo ""
+    echo "  ℹ No blockchain data found in export (image-only export)"
+    echo "  ℹ You can sync the blockchain from scratch after starting the VM"
+  fi
+  
   # Clean up extraction directory
   rm -rf "$temp_extract_dir"
   
   # Let user configure defaults for resource allocation
   echo ""
-  echo "[4/5] Configuring VM resources..."
+  echo "[6/7] Configuring VM resources..."
   
   if ! configure_defaults_direct; then
     echo "    Using default resource settings"
@@ -2023,14 +2976,14 @@ import_base_vm(){
   if ! prompt_sync_resources; then
     # Use defaults if cancelled
     detect_host_resources
-    SYNC_RAM_MB=$HOST_SUGGEST_SYNC_RAM
+    SYNC_RAM_MB=$HOST_SUGGEST_SYNC_RAM_MB
     SYNC_VCPUS=$HOST_SUGGEST_SYNC_VCPUS
   fi
   
   # Inject monitoring SSH key BEFORE creating the VM domain
   # This must happen while the disk is not in use by any VM
   echo ""
-  echo "[5/5] Configuring monitoring access..."
+  echo "[7/7] Configuring monitoring access..."
   
   # Ensure SSH key exists (but don't call ensure_monitor_ssh since VM doesn't exist yet)
   mkdir -p "$SSH_KEY_DIR"
@@ -2113,30 +3066,75 @@ import_base_vm(){
   pause "Import complete! VM '$VM_NAME' is ready.\n\nChoose 'Monitor Base VM Sync' to start it."
 }
 
-# import_from_github: Import base VM from GitHub release
-# Purpose: Download and import pre-built VM from GitHub releases
+# import_from_github: Import base VM from GitHub release (NEW MODULAR FORMAT)
+# Purpose: Download and import pre-built VM using modular architecture
+# Modular Design:
+#   - Downloads blockchain data separately from images
+#   - Downloads BOTH images (VM + container) for flexibility/switching later
+#   - Verifies checksums (unified SHA256SUMS when available)
+#   - Reassembles blockchain from split parts
+#   - Uses VM image for import; keeps container image for later use
 # Flow:
-#   1. Fetch available releases from GitHub API
-#   2. Let user select a release tag
-#   3. Download all parts with progress indicators
-#   4. Reassemble the archive
-#   5. Verify checksum
-#   6. Hand off to standard import process
-# Prerequisites: curl or wget for downloads, jq for JSON parsing
-# Side effects: Downloads ~22GB to /tmp, then imports to libvirt
+#   1. Let user configure defaults (reserves, VM sizes, clearnet toggle)
+#   2. Fetch available releases from GitHub API
+#   3. Let user select a release tag
+#   4. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
+#   5. Download VM image (vm-image-*.tar.gz or gm-vm-image-*.tar.gz)
+#   6. Download container image (container-image-*.tar.gz or gm-container-image-*.tar.gz)
+#   7. Verify checksums for parts and images (prefer SHA256SUMS)
+#   8. Reassemble blockchain from parts
+#   9. Extract VM image (vm-disk.qcow2, vm-definition.xml)
+#  10. Extract blockchain data
+#  11. Inject blockchain into VM disk using virt-tar-in
+#  12. Copy disk to /var/lib/libvirt/images/
+#  13. Import VM definition with virsh define
+#  14. Cleanup temporary files (keep original downloads)
+# Prerequisites: curl or wget, jq, virt-tar-in (libguestfs-tools)
+# Download Size: ~21GB (blockchain) + ~1GB (VM) + ~0.5GB (container) ≈ ~22.5GB total
+# Benefits over old format:
+#   - Blockchain is separate (can be reused/shared)
+#   - Smaller per-image downloads for updates (~1GB VM, ~0.5GB container)
+#   - Download both once, then switch between VM/container without re-downloading blockchain
+#   - Downloaded files preserved for USB transfer to other computers
+# Side effects: Downloads to ~/Downloads/gm-export-*, imports complete VM to libvirt
 import_from_github(){
   local repo="paulscode/garbageman-vmm"
   local api_url="https://api.github.com/repos/$repo/releases"
   
+  # Cleanup function for temporary files (called on both success and failure)
+  cleanup_vm_import_temps(){
+    local dir="$1"
+    [[ -z "$dir" || ! -d "$dir" ]] && return
+    
+    # Remove temporary files (keep original downloads for USB transfer)
+    rm -f "$dir"/blockchain.tar.gz "$dir"/gm-blockchain.tar.gz 2>/dev/null
+    rm -rf "$dir/blockchain-data" "$dir/vm-image" 2>/dev/null
+  }
+  
+  # Let user configure defaults for resource allocation
+  if ! configure_defaults_direct; then
+    pause "Cancelled."
+    return
+  fi
+  
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
-  echo "║                    Import Base VM from GitHub Release                          ║"
+  echo "║              Import Base VM from GitHub (Modular Download)                     ║"
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "This import downloads blockchain data and BOTH images (VM + container) separately."
+  echo "We'll import the VM now and keep the container image so you can switch later."
+  echo "Benefits: Smaller per-image downloads; switch without re-downloading blockchain."
   echo ""
   
   # Check for required tools
   if ! command -v jq >/dev/null 2>&1; then
     pause "❌ Required tool 'jq' not found.\n\nInstall with: sudo apt install jq"
+    return
+  fi
+  
+  if ! command -v virt-tar-in >/dev/null 2>&1; then
+    pause "❌ Required tool 'virt-tar-in' not found.\n\nInstall with: sudo apt install libguestfs-tools"
     return
   fi
   
@@ -2178,7 +3176,7 @@ import_from_github(){
   done < <(echo "$releases_json" | jq -r '.[].tag_name')
   
   if [[ ${#tags[@]} -eq 0 ]]; then
-    pause "No releases found with VM exports."
+    pause "No releases found."
     return
   fi
   
@@ -2199,85 +3197,235 @@ import_from_github(){
   local release_assets
   release_assets=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$selected_tag\") | .assets")
   
-  # Find all part files and checksum
-  local part_urls=()
-  local part_names=()
-  local checksum_url=""
-  local checksum_name=""
+  # Find blockchain parts, VM image, and checksums (support both old and new naming)
+  local blockchain_part_urls=()
+  local blockchain_part_names=()
+  local blockchain_checksum_url=""
+  local vm_image_url=""
+  local vm_image_name=""
+  local vm_checksum_url=""
+  local container_image_url=""
+  local container_image_name=""
+  local container_checksum_url=""
+  local sha256sums_url=""
   
   while IFS='|' read -r name url; do
     [[ -z "$name" ]] && continue
-    if [[ "$name" =~ \.part[0-9]+$ ]]; then
-      part_names+=("$name")
-      part_urls+=("$url")
-    elif [[ "$name" == "gm-base-export.tar.gz.sha256" ]]; then
-      checksum_name="$name"
-      checksum_url="$url"
+    # NEW naming (blockchain.tar.gz.part*)
+    if [[ "$name" =~ ^blockchain\.tar\.gz\.part[0-9]+$ ]]; then
+      blockchain_part_names+=("$name")
+      blockchain_part_urls+=("$url")
+    # OLD naming (gm-blockchain.tar.gz.part*)
+    elif [[ "$name" =~ ^gm-blockchain\.tar\.gz\.part[0-9]+$ ]]; then
+      blockchain_part_names+=("$name")
+      blockchain_part_urls+=("$url")
+    # NEW unified checksum file
+    elif [[ "$name" == "SHA256SUMS" ]]; then
+      sha256sums_url="$url"
+    # OLD blockchain checksum
+    elif [[ "$name" == "gm-blockchain.tar.gz.sha256" ]]; then
+      blockchain_checksum_url="$url"
+    # NEW VM image naming (vm-image-*)
+    elif [[ "$name" =~ ^vm-image-.*\.tar\.gz$ ]]; then
+      vm_image_name="$name"
+      vm_image_url="$url"
+    # OLD VM image naming (gm-vm-image-*)
+    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz$ ]]; then
+      vm_image_name="$name"
+      vm_image_url="$url"
+    # OLD VM image checksum
+    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image-.*\.tar\.gz\.sha256$ ]]; then
+      vm_checksum_url="$url"
+    # NEW container image naming (container-image-*)
+    elif [[ "$name" =~ ^container-image-.*\.tar\.gz$ ]]; then
+      container_image_name="$name"
+      container_image_url="$url"
+    # OLD container image naming (gm-container-image-*)
+    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz$ ]]; then
+      container_image_name="$name"
+      container_image_url="$url"
+    # OLD container image checksum
+    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image-.*\.tar\.gz\.sha256$ ]]; then
+      container_checksum_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
   
-  if [[ ${#part_urls[@]} -eq 0 ]]; then
-    pause "❌ No export parts found in release $selected_tag"
+  # Validate required files are present
+  if [[ ${#blockchain_part_urls[@]} -eq 0 ]]; then
+    pause "❌ No blockchain parts found in release $selected_tag"
     return
   fi
   
-  # Warn about download size
-  echo "⚠  Download size: ~22 GB (${#part_urls[@]} parts)"
+  if [[ -z "$vm_image_url" ]]; then
+    pause "❌ No VM image found in release $selected_tag"
+    return
+  fi
+  
+  # Container image is optional but recommended
+  if [[ -z "$container_image_url" ]]; then
+    echo "⚠️  Warning: No container image found in release (older format?)"
+  fi
+  
+  # Calculate approximate download sizes
+  local blockchain_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 )) GB"  # parts are ~1.9GB each
+  local vm_size="~1 GB"
+  local container_size="~500 MB"
+  local total_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 + 2 )) GB"
+  
+  echo "Download plan:"
+  echo "  • Blockchain data: ${#blockchain_part_urls[@]} parts ($blockchain_size)"
+  echo "  • VM image: $vm_image_name ($vm_size)"
+  if [[ -n "$container_image_url" ]]; then
+    echo "  • Container image: $container_image_name ($container_size)"
+    echo "  Total: $total_size"
+  fi
   echo ""
+  
+  local download_message="This will download approximately $total_size of data.\n\nBlockchain parts: ${#blockchain_part_urls[@]}\nVM image: $vm_image_name"
+  if [[ -n "$container_image_url" ]]; then
+    download_message+="\nContainer image: $container_image_name"
+  fi
+  download_message+="\nRelease: $selected_tag\n\nBoth images will be downloaded for flexibility.\nYou can switch between VM and container\nwithout re-downloading the blockchain.\n\nContinue?"
+  
   if ! whiptail --title "Confirm Download" \
-    --yesno "This will download approximately 22 GB of data.\n\nParts to download: ${#part_urls[@]}\nRelease: $selected_tag\n\nContinue?" \
-    12 70; then
+    --yesno "$download_message" \
+    18 75; then
     echo "Download cancelled."
     return
   fi
   
-  # Create temporary download directory
-  local temp_dir=$(mktemp -d -t gm-github-import-XXXXXX)
-  trap "rm -rf '$temp_dir'" RETURN EXIT INT TERM
+  # Create persistent download directory in ~/Downloads with unified export structure
+  local download_timestamp=$(date +%Y%m%d-%H%M%S)
+  local download_dir="$HOME/Downloads/gm-export-${download_timestamp}"
+  mkdir -p "$download_dir"
+  
+  # Set trap to cleanup temporary files on exit (success or failure)
+  trap "cleanup_vm_import_temps '$download_dir'" RETURN EXIT INT TERM
   
   echo ""
-  echo "Downloading to: $temp_dir"
+  echo "Downloading to: $download_dir"
+  echo "(Files will be kept for USB transfer or future imports)"
   echo ""
   
-  # Download all parts with progress
-  for i in "${!part_urls[@]}"; do
-    local part_name="${part_names[$i]}"
-    local part_url="${part_urls[$i]}"
+  # Step 1: Download blockchain parts
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 1: Downloading Blockchain Data (${#blockchain_part_urls[@]} parts)"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  for i in "${!blockchain_part_urls[@]}"; do
+    local part_name="${blockchain_part_names[$i]}"
+    local part_url="${blockchain_part_urls[$i]}"
     local part_num=$((i + 1))
     
-    echo "[Part $part_num/${#part_urls[@]}] Downloading $part_name..."
+    echo "[Part $part_num/${#blockchain_part_urls[@]}] Downloading $part_name..."
     
     if [[ "$download_tool" == "curl" ]]; then
-      curl -L --progress-bar -o "$temp_dir/$part_name" "$part_url" || {
+      curl -L --progress-bar -o "$download_dir/$part_name" "$part_url" || {
         pause "❌ Failed to download $part_name"
         return
       }
     else
-      wget --show-progress -O "$temp_dir/$part_name" "$part_url" || {
+      wget --show-progress -O "$download_dir/$part_name" "$part_url" || {
         pause "❌ Failed to download $part_name"
         return
       }
     fi
   done
   
-  # Download checksum file if available
-  if [[ -n "$checksum_url" ]]; then
+  # Download checksums (prefer unified SHA256SUMS, fall back to old format)
+  if [[ -n "$sha256sums_url" ]]; then
     echo ""
-    echo "Downloading checksum file..."
+    echo "Downloading unified checksum file (SHA256SUMS)..."
     if [[ "$download_tool" == "curl" ]]; then
-      curl -sL -o "$temp_dir/$checksum_name" "$checksum_url"
+      curl -sL -o "$download_dir/SHA256SUMS" "$sha256sums_url"
     else
-      wget -q -O "$temp_dir/$checksum_name" "$checksum_url"
+      wget -q -O "$download_dir/SHA256SUMS" "$sha256sums_url"
+    fi
+  elif [[ -n "$blockchain_checksum_url" ]]; then
+    echo ""
+    echo "Downloading blockchain checksum (old format)..."
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -sL -o "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
+    else
+      wget -q -O "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
     fi
   fi
   
-  # Verify checksums of downloaded parts if available
-  if [[ -f "$temp_dir/$checksum_name" ]]; then
+  # Step 2: Download VM image
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 2: Downloading VM Image"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  echo "Downloading $vm_image_name..."
+  
+  if [[ "$download_tool" == "curl" ]]; then
+    curl -L --progress-bar -o "$download_dir/$vm_image_name" "$vm_image_url" || {
+      pause "❌ Failed to download VM image"
+      return
+    }
+  else
+    wget --show-progress -O "$download_dir/$vm_image_name" "$vm_image_url" || {
+      pause "❌ Failed to download VM image"
+      return
+    }
+  fi
+  
+  # Download VM checksum (if separate file exists in old format)
+  if [[ -z "$sha256sums_url" ]] && [[ -n "$vm_checksum_url" ]]; then
     echo ""
-    echo "Verifying downloaded parts..."
-    cd "$temp_dir"
+    echo "Downloading VM image checksum (old format)..."
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -sL -o "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
+    else
+      wget -q -O "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
+    fi
+  fi
+  
+  # Download container image (if available)
+  if [[ -n "$container_image_url" ]]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════════════════"
+    echo "Step 2b: Downloading Container Image"
+    echo "═══════════════════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "Downloading $container_image_name..."
     
-    # Extract only the part checksums (ignore comments and reassembled file checksum)
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -L --progress-bar -o "$download_dir/$container_image_name" "$container_image_url" || {
+        echo "⚠ Failed to download container image (optional, continuing...)"
+      }
+    else
+      wget --show-progress -O "$download_dir/$container_image_name" "$container_image_url" || {
+        echo "⚠ Failed to download container image (optional, continuing...)"
+      }
+    fi
+    
+    # Download container checksum (if separate file exists in old format)
+    if [[ -z "$sha256sums_url" ]] && [[ -n "$container_checksum_url" ]]; then
+      echo ""
+      echo "Downloading container image checksum (old format)..."
+      if [[ "$download_tool" == "curl" ]]; then
+        curl -sL -o "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
+      else
+        wget -q -O "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
+      fi
+    fi
+  fi
+  
+  # Step 3: Verify blockchain parts
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 3: Verifying Downloads"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Detect checksum format and verify
+  if [[ -f "$download_dir/SHA256SUMS" ]]; then
+    echo "Verifying blockchain parts (unified checksum)..."
+    cd "$download_dir"
+    
     local verify_failed=false
     while IFS= read -r line; do
       [[ "$line" =~ ^# ]] && continue  # Skip comments
@@ -2288,89 +3436,264 @@ import_from_github(){
         echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
         verify_failed=true
       fi
-    done < "$checksum_name"
+    done < "SHA256SUMS"
     
     if [[ "$verify_failed" == "true" ]]; then
       cd - >/dev/null
-      pause "❌ One or more parts failed checksum verification!"
+      pause "❌ One or more blockchain parts failed checksum verification!"
       return
     fi
     
-    echo "    ✓ All parts verified"
-    cd - >/dev/null
-  fi
-  
-  # Reassemble the archive
-  echo ""
-  echo "Reassembling archive..."
-  cat "$temp_dir"/gm-base-export.tar.gz.part* > "$temp_dir/gm-base-export.tar.gz"
-  echo "    ✓ Archive reassembled"
-  
-  # Verify reassembled archive checksum if available
-  if [[ -f "$temp_dir/$checksum_name" ]]; then
+    echo "    ✓ All blockchain parts verified"
+    
+    # Verify VM image from same SHA256SUMS file
     echo ""
-    echo "Verifying reassembled archive..."
-    cd "$temp_dir"
-    
-    # Look for the reassembled file checksum (non-comment, non-part line)
-    local reassembled_checksum=""
-    while IFS= read -r line; do
-      [[ "$line" =~ ^# ]] && continue  # Skip comments
-      [[ -z "$line" ]] && continue     # Skip empty lines
-      [[ "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip part lines
-      
-      # This should be the reassembled file checksum
-      reassembled_checksum="$line"
-      break
-    done < "$checksum_name"
-    
-    if [[ -n "$reassembled_checksum" ]]; then
-      if echo "$reassembled_checksum" | sha256sum -c --quiet 2>/dev/null; then
-        echo "    ✓ Reassembled archive verified"
+    echo "Verifying VM image (unified checksum)..."
+    if grep -q "$(basename "$vm_image_name")" "SHA256SUMS" 2>/dev/null; then
+      if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
+        echo "    ✓ VM image verified"
       else
         cd - >/dev/null
-        pause "❌ Reassembled archive checksum verification failed!"
+        pause "❌ VM image checksum verification failed!"
         return
       fi
     else
-      echo "    ⚠ No reassembled archive checksum found (skipping)"
+      echo "    ⚠ VM image not in SHA256SUMS (skipping verification)"
+    fi
+    
+    # Verify container image from same SHA256SUMS file (if downloaded)
+    if [[ -n "$container_image_url" ]] && [[ -f "$download_dir/$container_image_name" ]]; then
+      echo ""
+      echo "Verifying container image (unified checksum)..."
+      if grep -q "$(basename "$container_image_name")" "SHA256SUMS" 2>/dev/null; then
+        if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
+          echo "    ✓ Container image verified"
+        else
+          echo "    ⚠ Container image checksum failed (optional, continuing...)"
+        fi
+      else
+        echo "    ⚠ Container image not in SHA256SUMS (skipping verification)"
+      fi
+    fi
+    
+    cd - >/dev/null
+    
+  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
+    echo "Verifying blockchain parts (old format)..."
+    cd "$download_dir"
+    
+    local verify_failed=false
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue  # Skip comments
+      [[ -z "$line" ]] && continue     # Skip empty lines
+      [[ ! "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip non-part lines
+      
+      if ! echo "$line" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
+        verify_failed=true
+      fi
+    done < "gm-blockchain.tar.gz.sha256"
+    
+    if [[ "$verify_failed" == "true" ]]; then
+      cd - >/dev/null
+      pause "❌ One or more blockchain parts failed checksum verification!"
+      return
+    fi
+    
+    echo "    ✓ All blockchain parts verified"
+    cd - >/dev/null
+    
+    # Verify VM image (old format - separate file)
+    if [[ -f "$download_dir/${vm_image_name}.sha256" ]]; then
+      echo ""
+      echo "Verifying VM image (old format)..."
+      cd "$download_dir"
+      
+      if sha256sum -c "${vm_image_name}.sha256" --quiet 2>/dev/null; then
+        echo "    ✓ VM image verified"
+      else
+        cd - >/dev/null
+        pause "❌ VM image checksum verification failed!"
+        return
+      fi
+      
+      cd - >/dev/null
+    else
+      echo "    ⚠ No VM image checksum file (skipping verification)"
+    fi
+  else
+    echo "    ⚠ No checksum files found (skipping verification)"
+  fi
+  
+  # Step 4: Reassemble blockchain
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 4: Reassembling Blockchain Data"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Detect naming scheme (new: blockchain.tar.gz.part*, old: gm-blockchain.tar.gz.part*)
+  local blockchain_archive=""
+  if ls "$download_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
+    cat "$download_dir"/blockchain.tar.gz.part* > "$download_dir/blockchain.tar.gz"
+    blockchain_archive="blockchain.tar.gz"
+    echo "✓ Blockchain reassembled (new naming)"
+  elif ls "$download_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+    cat "$download_dir"/gm-blockchain.tar.gz.part* > "$download_dir/gm-blockchain.tar.gz"
+    blockchain_archive="gm-blockchain.tar.gz"
+    echo "✓ Blockchain reassembled (old naming)"
+  else
+    pause "❌ No blockchain parts found to reassemble!"
+    return
+  fi
+  
+  # Verify reassembled blockchain if checksum available
+  if [[ -f "$download_dir/SHA256SUMS" ]]; then
+    echo ""
+    echo "Verifying reassembled blockchain..."
+    cd "$download_dir"
+    
+    if grep -q "$blockchain_archive\$" "SHA256SUMS" 2>/dev/null; then
+      if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
+        echo "    ✓ Reassembled blockchain verified"
+      else
+        cd - >/dev/null
+        pause "❌ Reassembled blockchain checksum verification failed!"
+        return
+      fi
+    else
+      echo "    ⚠ No checksum entry for reassembled blockchain"
+    fi
+    
+    cd - >/dev/null
+    
+  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
+    echo ""
+    echo "Verifying reassembled blockchain (old format)..."
+    cd "$download_dir"
+    
+    local reassembled_checksum=""
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue
+      [[ -z "$line" ]] && continue
+      [[ "$line" =~ \.part[0-9][0-9] ]] && continue
+      reassembled_checksum="$line"
+      break
+    done < "gm-blockchain.tar.gz.sha256"
+    
+    if [[ -n "$reassembled_checksum" ]]; then
+      if echo "$reassembled_checksum" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✓ Reassembled blockchain verified"
+      else
+        cd - >/dev/null
+        pause "❌ Reassembled blockchain checksum verification failed!"
+        return
+      fi
     fi
     
     cd - >/dev/null
   fi
   
-  # Move to Downloads and create matching .sha256 file
+  # Step 5: Extract and import VM image
   echo ""
-  echo "Moving to ~/Downloads for import..."
-  local timestamp=$(date +%Y%m%d-%H%M%S)
-  local final_name="gm-base-export-${timestamp}-github.tar.gz"
-  mv "$temp_dir/gm-base-export.tar.gz" "$HOME/Downloads/$final_name"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 5: Importing VM Image"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
   
-  if [[ -f "$temp_dir/$checksum_name" ]]; then
-    # Create checksum for the final file
-    (cd "$HOME/Downloads" && sha256sum "$final_name" > "${final_name}.sha256")
+  local vm_extract_dir="$download_dir/vm-image"
+  mkdir -p "$vm_extract_dir"
+  
+  echo "Extracting VM image archive..."
+  tar -xzf "$download_dir/$vm_image_name" -C "$vm_extract_dir"
+  
+  # Find the qcow2 disk file
+  local vm_disk=$(find "$vm_extract_dir" -name "*.qcow2" | head -n1)
+  if [[ -z "$vm_disk" ]]; then
+    pause "❌ No .qcow2 disk file found in VM image archive"
+    return
   fi
   
-  echo "    ✓ Saved to ~/Downloads/$final_name"
+  # Find the XML definition
+  local vm_xml=$(find "$vm_extract_dir" -name "*.xml" | head -n1)
+  if [[ -z "$vm_xml" ]]; then
+    pause "❌ No .xml definition file found in VM image archive"
+    return
+  fi
+  
+  echo "Found VM disk: $(basename "$vm_disk")"
+  echo "Found VM definition: $(basename "$vm_xml")"
+  echo ""
+  
+  # Step 6: Inject blockchain into VM disk
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 6: Injecting Blockchain Data into VM"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  echo "Extracting blockchain archive..."
+  local blockchain_extract_dir="$download_dir/blockchain-data"
+  mkdir -p "$blockchain_extract_dir"
+  tar -xzf "$download_dir/$blockchain_archive" -C "$blockchain_extract_dir"
+  
+  echo "Injecting blockchain into VM disk (this may take several minutes)..."
+  sudo virt-tar-in -a "$vm_disk" "$blockchain_extract_dir" /var/lib/bitcoin || {
+    pause "❌ Failed to inject blockchain data into VM disk"
+    return
+  }
+  
+  echo "    ✓ Blockchain injected"
+  
+  # Step 7: Import VM into libvirt
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 7: Installing VM into Libvirt"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Copy disk to libvirt images directory
+  local final_disk_path="/var/lib/libvirt/images/${VM_NAME}.qcow2"
+  echo "Copying disk to $final_disk_path..."
+  sudo cp "$vm_disk" "$final_disk_path"
+  sudo chown libvirt-qemu:kvm "$final_disk_path"
+  
+  # Import VM definition
+  echo "Importing VM definition..."
+  sudo virsh define "$vm_xml" || {
+    pause "❌ Failed to import VM definition"
+    return
+  }
+  
+  echo "    ✓ VM imported successfully"
+  
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
-  echo "║                        Download Complete!                                      ║"
+  echo "║                   VM Import Complete!                                          ║"
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
   echo ""
-  
-  # Ask if user wants to import now
-  if whiptail --title "Import Now?" \
-    --yesno "Download complete!\n\nWould you like to import this VM now?" \
-    10 70; then
-    # Call standard import, but we need to set up the selection to point to our file
-    # For now, just inform the user
-    echo ""
-    echo "Starting import process..."
-    echo ""
-    import_base_vm
-  else
-    pause "Download complete!\n\nThe archive is in ~/Downloads/$final_name\nYou can import it later via 'Create Base VM' → 'Import from file'"
+  echo "The base VM '$VM_NAME' has been created with:"
+  echo "  • VM image (Alpine Linux + Garbageman)"
+  echo "  • Complete blockchain data"
+  if [[ -n "$container_image_url" ]] && [[ -f "$download_dir/$container_image_name" ]]; then
+    echo "  • Container image (downloaded for later use)"
   fi
+  echo ""
+  echo "Downloaded files saved to:"
+  echo "  $download_dir"
+  echo ""
+  echo "  ℹ You can copy this folder to USB stick for importing on another computer"
+  echo "  ℹ Use 'Import from File' option and select the folder to import"
+  if [[ -n "$container_image_url" ]] && [[ -f "$download_dir/$container_image_name" ]]; then
+    echo "  ℹ Both VM and container images available - switch between them anytime"
+  fi
+  echo "  ℹ Temporary files cleaned up automatically"
+  echo ""
+  echo "Next steps:"
+  echo "  • Start VM with 'Monitor Base VM Sync' or 'Manage Base VM'"
+  echo "  • Create clones for additional nodes"
+  echo ""
+  
+  pause "Press Enter to return to main menu..."
 }
 
 ################################################################################
@@ -2742,7 +4065,8 @@ get_peer_breakdown(){
 # Purpose: Show real-time status with auto-refresh (like IBD monitor but simpler)
 # Args: $1 = VM name to monitor
 # Display: Auto-refreshing every 5 seconds, exit with Ctrl+C
-# Shows: State, IP, .onion address, blocks/headers, peers, resources
+# Shows: State, Internal IP, .onion address, blocks/headers, peers, resources
+#        IPv4 address (only for BASE VM when CLEARNET_OK=yes). VM clones are Tor-only.
 monitor_vm_status(){
   local vm_name="$1"
   
@@ -2767,6 +4091,17 @@ monitor_vm_status(){
       if [[ -n "$ip" ]]; then
         # Get .onion address
         onion=$(gssh "$ip" 'cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null' 2>/dev/null || echo "unknown")
+        
+        # Check if this is the base VM and if clearnet is enabled
+        local ipv4_address=""
+        if [[ "$vm_name" == "$VM_NAME" ]] && [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+          # Get external IPv4 address for base VM when clearnet is enabled
+          ipv4_address=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null' 2>/dev/null | jq -r '.localaddresses[] | select(.network=="ipv4") | .address' 2>/dev/null | head -n1 || echo "")
+          if [[ -z "$ipv4_address" ]]; then
+            # Fallback: try to get from VM's network interface
+            ipv4_address=$(gssh "$ip" 'ip -4 addr show eth0 2>/dev/null | grep -oP "(?<=inet\s)\d+(\.\d+){3}"' 2>/dev/null | head -n1 || echo "detecting...")
+          fi
+        fi
         
         # Get blockchain info
         info=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' 2>/dev/null || echo "")
@@ -2819,8 +4154,11 @@ monitor_vm_status(){
     
     if [[ "$state" == "running" && -n "$ip" ]]; then
       printf "║%-80s║\n" "  Network Status:"
-      printf "║%-80s║\n" "    IP:     $ip"
-      printf "║%-80s║\n" "    Tor:    $onion"
+      printf "║%-80s║\n" "    Internal IP: $ip"
+      printf "║%-80s║\n" "    Tor:         $onion"
+      if [[ -n "$ipv4_address" ]]; then
+        printf "║%-80s║\n" "    IPv4:        $ipv4_address (clearnet enabled)"
+      fi
       printf "║%-80s║\n" ""
       printf "║%-80s║\n" "  Bitcoin Status:"
       printf "║%-80s║\n" "    Blocks:   $blocks / $headers"
@@ -3160,6 +4498,55 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     info="$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' || true)"
     netinfo="$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null' || true)"
     
+    # Check if bitcoind is actually responding (info will be empty if RPC not ready)
+    if [[ -z "$info" || "$info" == "{}" ]]; then
+      # Bitcoind not ready yet - check if it's actually running
+      local bitcoind_status
+      bitcoind_status="$(gssh "$ip" 'pgrep -f bitcoind >/dev/null && echo "running" || echo "not running"' 2>/dev/null || echo "unknown")"
+      
+      local tor_status
+      tor_status="$(gssh "$ip" 'pgrep -f tor >/dev/null && echo "running" || echo "not running"' 2>/dev/null || echo "unknown")"
+      
+      # Show waiting message
+      clear
+      printf "╔════════════════════════════════════════════════════════════════════════════════╗\n"
+      printf "║%-80s║\n" "                     Garbageman IBD Monitor - Starting"
+      printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  VM Status:"
+      printf "║%-80s║\n" "    Name: ${VM_NAME}"
+      printf "║%-80s║\n" "    IP:   ${ip}"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Service Status:"
+      printf "║%-80s║\n" "    Bitcoin: ${bitcoind_status}"
+      printf "║%-80s║\n" "    Tor:     ${tor_status}"
+      printf "║%-80s║\n" ""
+      
+      if [[ "$bitcoind_status" == "not running" ]]; then
+        printf "║%-80s║\n" "  ⚠ Problem Detected:"
+        printf "║%-80s║\n" "    Bitcoin daemon is not running!"
+        printf "║%-80s║\n" ""
+        printf "║%-80s║\n" "  This usually means there was a problem during import or startup."
+        printf "║%-80s║\n" "  Try deleting and re-importing the VM."
+      else
+        printf "║%-80s║\n" "     Waiting for Bitcoin daemon to initialize..."
+        printf "║%-80s║\n" "     (This can take 1-2 minutes on first boot)"
+      fi
+      
+      printf "║%-80s║\n" ""
+      printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+      printf "║%-80s║\n" "  Auto-refreshing every ${POLL_SECS} seconds... Press 'q' to exit"
+      printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
+      
+      # Check for 'q' key press
+      if read -t "$POLL_SECS" -n 1 key 2>/dev/null && [[ "$key" == "q" ]]; then
+        echo ""
+        echo "Exiting monitor. VM will continue running in background."
+        return
+      fi
+      continue  # Skip the rest and retry
+    fi
+    
     local blocks headers vp ibd pct peers time_block
     blocks="$(jq -r '.blocks // 0' <<<"$info" 2>/dev/null || echo 0)"
     headers="$(jq -r '.headers // 0' <<<"$info" 2>/dev/null || echo 0)"
@@ -3394,26 +4781,57 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
 # Export Base VM (Action 3 - Manage Base VM submenu)
 ################################################################################
 
-# export_base_vm: Create a sanitized, portable export of the base VM
-# Purpose: Package the base VM for import on another system
+# export_base_vm: Create a modular export of the base VM (NEW MODULAR FORMAT)
+# Purpose: Package the base VM as TWO separate components for efficient distribution
+# Export Components:
+#   1. VM Image (WITHOUT blockchain) - ~1GB compressed
+#      - Alpine Linux + compiled Garbageman
+#      - Configuration files and services
+#      - Sanitized (no sensitive data)
+#   2. Blockchain Data (separate) - ~20GB compressed, split into 1.9GB parts
+#      - Complete blockchain (pruned to 750MB)
+#      - Can be reused across multiple VM/container exports
+#      - GitHub-compatible (parts < 2GB)
 # Security: Removes all sensitive/identifying information:
-#   - Tor hidden service keys (forces fresh .onion address)
-#   - SSH authorized keys (host-specific monitoring key)
-#   - Tor control cookie and state data
-#   - Bitcoin peer databases (peers.dat, anchors.dat, banlist.dat)
-#   - Bitcoin debug logs (may contain peer IPs)
-#   - Machine identifiers (machine-id, SSH host keys)
-#   - System logs
+#   FROM VM IMAGE:
+#     - Blockchain data (exported separately)
+#     - Tor hidden service keys (forces fresh .onion address)
+#     - SSH authorized keys (host-specific monitoring key)
+#     - Tor control cookie and state data
+#     - Machine identifiers (machine-id, SSH host keys)
+#     - System logs
+#     - Resets bitcoin.conf to generic Tor-only configuration
+#   FROM BLOCKCHAIN DATA:
+#     - Bitcoin peer databases (peers.dat, anchors.dat, banlist.dat)
+#     - Bitcoin debug logs (may contain peer IPs)
+#     - Tor hidden service keys
+#     - Wallet files (none should exist but removed as precaution)
+#     - Mempool and fee estimate data
+#     - Lock files and PIDs
 # Flow:
-#   1. Check base VM exists and is synced (warn if not)
-#   2. Ensure base VM is shut off (graceful shutdown if running)
-#   3. Create temporary clone for sanitization (preserves original)
-#   4. Sanitize clone using virt-sysprep + manual cleanup
-#   5. Compress disk image and create metadata JSON
-#   6. Package as tar.gz archive
-#   7. Clean up temporary clone
-# Output: Creates gm-base-export-YYYYMMDD-HHMMSS.tar.gz in ~/Downloads
-#         Contains: sanitized qcow2 disk + metadata.json
+#   1. Extract blockchain from VM disk using virt-tar-out
+#   2. Sanitize blockchain data (remove sensitive files)
+#   3. Compress sanitized blockchain
+#   4. Split blockchain into 1.9GB parts for GitHub
+#   5. Generate blockchain checksums and manifest
+#   6. Shut down base VM (graceful shutdown if running)
+#   7. Create temporary clone for sanitization (preserves original)
+#   8. Remove blockchain from clone and sanitize using virt-sysprep
+#   9. Export VM definition and compress disk image
+#   10. Create VM image archive with README
+#   11. Clean up temporary clone
+# Output: Creates unified export folder in ~/Downloads:
+#   gm-export-YYYYMMDD-HHMMSS/
+#     - blockchain.tar.gz.part01, part02, etc. (sanitized)
+#     - vm-image-YYYYMMDD-HHMMSS.tar.gz (sanitized)
+#     - SHA256SUMS
+#     - MANIFEST.txt
+# Benefits:
+#   - Much smaller VM image downloads (1GB vs 22GB)
+#   - Blockchain can be shared between VM and container exports
+#   - Can update VM image without re-downloading blockchain
+#   - GitHub-compatible split files (all parts < 2GB)
+# SAFE FOR PUBLIC DISTRIBUTION - All identifying information removed from both components
 export_base_vm(){
   ensure_tools
   
@@ -3426,61 +4844,282 @@ export_base_vm(){
   current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
   
   local sync_warning=""
+  local blocks=""
+  local headers=""
+  local blockchain_height="unknown"
+  local was_running=true
+  
   if [[ "$current_state" == "running" ]]; then
+    # VM already running, query directly
     local ip
     ip=$(vm_ip "$VM_NAME" 2>/dev/null || echo "")
     
     if [[ -n "$ip" ]]; then
-      local blocks headers
       local info
       info=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' 2>/dev/null || echo "")
       blocks=$(jq -r '.blocks // ""' <<<"$info" 2>/dev/null || echo "")
       headers=$(jq -r '.headers // ""' <<<"$info" 2>/dev/null || echo "")
       
+      if [[ -n "$blocks" ]]; then
+        blockchain_height="$blocks"
+      fi
+      
       if [[ -n "$blocks" && -n "$headers" && "$blocks" != "$headers" ]]; then
         sync_warning="\n⚠️  WARNING: Blockchain may not be fully synced (blocks: $blocks / $headers)"
       fi
+    fi
+  else
+    # VM not running, start it temporarily to get blockchain height
+    echo "VM is stopped, starting temporarily to query blockchain..."
+    was_running=false
+    
+    if virsh_cmd start "$VM_NAME" >/dev/null 2>&1; then
+      # Wait for VM to get IP address
+      local wait_count=0
+      local max_wait=24  # 24 * 5 = 120 seconds (2 minutes)
+      local ip=""
+      
+      echo "Waiting for VM to be ready..."
+      while [[ $wait_count -lt $max_wait ]]; do
+        ip=$(vm_ip "$VM_NAME" 2>/dev/null || echo "")
+        if [[ -n "$ip" ]]; then
+          break
+        fi
+        wait_count=$((wait_count + 1))
+        sleep 5
+      done
+      
+      if [[ -n "$ip" ]]; then
+        # Wait for bitcoind to be ready
+        wait_count=0
+        max_wait=12  # 12 * 5 = 60 seconds
+        echo "Waiting for bitcoind to be ready..."
+        
+        while [[ $wait_count -lt $max_wait ]]; do
+          local info
+          info=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' 2>/dev/null || echo "")
+          blocks=$(jq -r '.blocks // ""' <<<"$info" 2>/dev/null || echo "")
+          
+          if [[ -n "$blocks" ]]; then
+            blockchain_height="$blocks"
+            headers=$(jq -r '.headers // ""' <<<"$info" 2>/dev/null || echo "")
+            if [[ -n "$headers" && "$blocks" != "$headers" ]]; then
+              sync_warning="\n⚠️  WARNING: Blockchain may not be fully synced (blocks: $blocks / $headers)"
+            fi
+            break
+          fi
+          wait_count=$((wait_count + 1))
+          sleep 5
+        done
+        
+        if [[ -z "$blocks" ]]; then
+          echo "⚠️  bitcoind did not respond in time, block height will be 'unknown'"
+        fi
+      else
+        echo "⚠️  Failed to get VM IP address, block height will be 'unknown'"
+      fi
+    else
+      echo "⚠️  Failed to start VM, block height will be 'unknown'"
     fi
   fi
   
   # Confirm export with user
   if ! whiptail --title "Export Base VM" --yesno \
-    "This will create a sanitized, portable export of '$VM_NAME'.\n\n\
+    "This will create a MODULAR export of '$VM_NAME':\n\n\
+Export Components:\n\
+• VM Image (WITHOUT blockchain) - ~1 GB compressed\n\
+• Blockchain Data (separate file) - ~20 GB compressed\n\n\
 Security measures:\n\
 • Removes Tor keys (forces fresh .onion on import)\n\
 • Removes SSH keys and machine identifiers\n\
 • Clears peer databases and logs\n\
 • Resets to generic Tor-only configuration\n\n\
 Export will be saved to: ~/Downloads/\n\
-Size: ~10-15 GB compressed (may take 10-30 minutes)\n\n\
+Total time: 10-30 minutes\n\n\
 The base VM will be shut down during export (if running).\n\
 Original VM will remain intact.${sync_warning}\n\n\
-Proceed with export?" 24 78; then
+Proceed with export?" 26 78; then
     return
   fi
   
   # Generate export name with timestamp
   local export_timestamp
   export_timestamp=$(date +%Y%m%d-%H%M%S)
-  local export_name="gm-base-export-${export_timestamp}"
+  local export_name="gm-export-${export_timestamp}"
   local export_dir="$HOME/Downloads/${export_name}"
   local temp_clone="${VM_NAME}-export-temp"
   
-  # Create export directory
+  # Create export directory (flat structure, no subdirectories)
   mkdir -p "$export_dir" || die "Failed to create export directory: $export_dir"
   
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
-  echo "║                          Exporting Base VM                                     ║"
+  echo "║                    Exporting Base VM (Modular Export)                          ║"
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
   echo ""
+  echo "This will create a unified export folder containing:"
+  echo "  1. VM image (WITHOUT blockchain) - for fast updates"
+  echo "  2. Blockchain data (split into parts) - can be reused across exports"
+  echo ""
   
-  # Step 1: Shut down base VM if running
-  echo "[1/7] Ensuring base VM is shut down..."
+  # Step 1: Export blockchain data FIRST (while VM might still be running)
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 1: Export Blockchain Data (Sanitized)"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Export directly to main folder (flat structure)
+  local blockchain_export_dir="$export_dir"
+  
+  echo "[1/6] Extracting blockchain from VM disk..."
+  local vm_disk="/var/lib/libvirt/images/${VM_NAME}.qcow2"
+  local temp_blockchain="$blockchain_export_dir/.tmp-blockchain"
+  mkdir -p "$temp_blockchain" || die "Failed to create temporary blockchain directory"
+  
+  # Use virt-tar-out to extract blockchain to temporary location for sanitization
+  sudo virt-tar-out -a "$vm_disk" /var/lib/bitcoin - | tar x -C "$temp_blockchain" || {
+    rm -rf "$export_dir"
+    die "Failed to extract blockchain data from VM disk"
+  }
+  
+  echo "    ✓ Blockchain extracted"
+  
+  echo ""
+  echo "[2/6] Sanitizing sensitive data..."
+  # Remove sensitive files that shouldn't be in public exports
+  rm -f "$temp_blockchain/peers.dat" 2>/dev/null || true
+  rm -f "$temp_blockchain/anchors.dat" 2>/dev/null || true
+  rm -f "$temp_blockchain/banlist.dat" 2>/dev/null || true
+  rm -f "$temp_blockchain/debug.log" 2>/dev/null || true
+  rm -f "$temp_blockchain/.lock" 2>/dev/null || true
+  rm -f "$temp_blockchain/onion_private_key" 2>/dev/null || true
+  rm -f "$temp_blockchain/onion_v3_private_key" 2>/dev/null || true
+  rm -rf "$temp_blockchain/.cookie" 2>/dev/null || true
+  rm -f "$temp_blockchain/bitcoind.pid" 2>/dev/null || true
+  
+  # Remove any wallet files (shouldn't exist in pruned node, but be safe)
+  rm -f "$temp_blockchain/wallet.dat" 2>/dev/null || true
+  rm -rf "$temp_blockchain/wallets" 2>/dev/null || true
+  
+  # Remove mempool - not needed and may contain transaction info
+  rm -f "$temp_blockchain/mempool.dat" 2>/dev/null || true
+  
+  # Remove fee estimates (not sensitive but not needed)
+  rm -f "$temp_blockchain/fee_estimates.dat" 2>/dev/null || true
+  
+  echo "    ✓ Sensitive data removed:"
+  echo "      - Peer databases (peers.dat, anchors.dat, banlist.dat)"
+  echo "      - Tor hidden service keys"
+  echo "      - Debug logs and lock files"
+  echo "      - Wallet files (if any)"
+  echo "      - Mempool and fee estimate data"
+  
+  echo ""
+  echo "[3/6] Compressing sanitized blockchain..."
+  tar czf "$blockchain_export_dir/blockchain-data.tar.gz" -C "$temp_blockchain" . || {
+    rm -rf "$export_dir"
+    die "Failed to compress blockchain data"
+  }
+  
+  # Clean up temporary extraction
+  rm -rf "$temp_blockchain"
+  
+  local blockchain_size
+  blockchain_size=$(du -h "$blockchain_export_dir/blockchain-data.tar.gz" | cut -f1)
+  echo "    ✓ Blockchain compressed ($blockchain_size)"
+  
+  echo ""
+  echo "[4/6] Splitting blockchain for GitHub (1.9GB parts)..."
+  cd "$blockchain_export_dir"
+  split -b 1900M -d -a 2 "blockchain-data.tar.gz" "blockchain.tar.gz.part"
+  
+  # Renumber parts to start from 01 instead of 00
+  local part_count=0
+  for part in blockchain.tar.gz.part*; do
+    if [[ -f "$part" ]]; then
+      part_count=$((part_count + 1))
+    fi
+  done
+  
+  if [[ $part_count -gt 0 ]]; then
+    for ((i=part_count-1; i>=0; i--)); do
+      local old_num=$(printf "%02d" $i)
+      local new_num=$(printf "%02d" $((i+1)))
+      mv "blockchain.tar.gz.part${old_num}" "blockchain.tar.gz.part${new_num}"
+    done
+  fi
+  
+  rm -f "blockchain-data.tar.gz"  # Remove unsplit version
+  
+  echo "    ✓ Split into $part_count parts"
+  
+  echo ""
+  echo "[5/6] Creating manifest..."
+  
+  # Create manifest
+  cat > MANIFEST.txt << EOF
+Blockchain Data Export (SANITIZED)
+===================================
+
+Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Export Timestamp: $export_timestamp
+Source: $VM_NAME (VM)
+Block Height: $blockchain_height
+
+Security:
+=========
+
+✓ Peer databases removed (peers.dat, anchors.dat, banlist.dat)
+✓ Tor hidden service keys removed
+✓ Debug logs removed
+✓ Wallet files removed (if any existed)
+✓ Mempool and fee estimate data removed
+✓ Lock files and PIDs removed
+
+This blockchain data is SAFE for public distribution.
+Sensitive/identifying information has been stripped.
+
+Split Information:
+==================
+
+This blockchain data has been split into $part_count parts for GitHub compatibility.
+Each part is approximately 1.9GB (under GitHub's 2GB limit).
+
+To Reassemble:
+==============
+
+cat blockchain.tar.gz.part* > blockchain.tar.gz
+
+Or let garbageman-vmm.sh handle it automatically via "Import from file"
+
+Files in this export:
+=====================
+
+$(ls -1h blockchain.tar.gz.part* | while read f; do
+    size=$(du -h "$f" | cut -f1)
+    echo "  $f ($size)"
+done)
+
+Total Size: $(du -ch blockchain.tar.gz.part* | tail -n1 | cut -f1)
+EOF
+  
+  echo "    ✓ Blockchain export complete (sanitized)"
+  
+  # Step 2: Shut down base VM if we started it or if it was already running
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 2: Prepare VM for Image Export"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  echo "[1/1] Ensuring base VM is shut down..."
   current_state=$(vm_state "$VM_NAME" 2>/dev/null || echo "unknown")
   
   if [[ "$current_state" == "running" ]]; then
-    echo "      Base VM is running. Shutting down gracefully..."
+    if [[ "$was_running" == "false" ]]; then
+      echo "      VM was started temporarily for blockchain query. Shutting down..."
+    else
+      echo "      Base VM is running. Shutting down gracefully..."
+    fi
     echo "      This may take up to 3 minutes for bitcoind to close cleanly."
     
     sudo virsh shutdown "$VM_NAME" >/dev/null 2>&1 || true
@@ -3517,7 +5156,11 @@ Proceed with export?" 24 78; then
   
   # Step 2: Create temporary clone for sanitization
   echo ""
-  echo "[2/7] Creating temporary clone for sanitization..."
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 3: Create and Sanitize VM Image"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  echo "[1/7] Creating temporary clone..."
   local temp_disk="/var/lib/libvirt/images/${temp_clone}.qcow2"
   
   # Clean up any previous failed export attempt
@@ -3537,7 +5180,7 @@ Proceed with export?" 24 78; then
   
   # Step 3: Sanitize using virt-sysprep (removes SSH keys, machine-id, logs, etc.)
   echo ""
-  echo "[3/7] Sanitizing VM (removing sensitive data)..."
+  echo "[2/7] Sanitizing VM (removing sensitive data)..."
   echo "      This may take a few minutes..."
   
   # virt-sysprep removes: SSH keys, machine-id, logs, random-seed, etc.
@@ -3554,9 +5197,21 @@ Proceed with export?" 24 78; then
   }
   echo "      ✓ Basic sanitization complete (SSH keys, logs, machine-id removed)"
   
-  # Step 4: Additional cleanup specific to Bitcoin/Tor
+  # Step 4: Additional cleanup specific to Bitcoin/Tor (INCLUDING removing blockchain)
   echo ""
-  echo "[4/7] Removing Bitcoin/Tor sensitive data..."
+  echo "[3/7] Removing blockchain data and Bitcoin/Tor sensitive data..."
+  
+  # Remove blockchain data first
+  sudo virt-customize -d "$temp_clone" --no-selinux-relabel \
+    --run-command "rm -rf /var/lib/bitcoin/* || true" \
+    2>&1 | grep -v "random seed" >&2 || {
+    echo "      ✗ Failed to remove blockchain data"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir" "$blockchain_export_dir"
+    die "Export failed during blockchain removal"
+  }
   
   # Remove Tor hidden service keys and state
   sudo virt-customize -d "$temp_clone" --no-selinux-relabel \
@@ -3568,7 +5223,7 @@ Proceed with export?" 24 78; then
     sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
     sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
     sudo rm -f "$temp_disk" 2>/dev/null || true
-    rm -rf "$export_dir"
+    rm -rf "$export_dir" "$blockchain_export_dir"
     die "Export failed during Tor cleanup"
   }
   
@@ -3584,7 +5239,7 @@ Proceed with export?" 24 78; then
     sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
     sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
     sudo rm -f "$temp_disk" 2>/dev/null || true
-    rm -rf "$export_dir"
+    rm -rf "$export_dir" "$blockchain_export_dir"
     die "Export failed during Bitcoin cleanup"
   }
   
@@ -3612,7 +5267,7 @@ BTCCONF" \
     sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
     sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
     sudo rm -f "$temp_disk" 2>/dev/null || true
-    rm -rf "$export_dir"
+    rm -rf "$export_dir" "$blockchain_export_dir"
     die "Export failed during bitcoin.conf reset"
   }
   
@@ -3621,163 +5276,263 @@ BTCCONF" \
     --hostname "gm-base" \
     2>&1 | grep -v "random seed" >&2 || true
   
-  echo "      ✓ Bitcoin/Tor data sanitized"
+  echo "      ✓ VM image sanitized (blockchain removed, sensitive data cleared)"
   
-  # Step 5: Gather metadata before undefining the domain
+  # Step 5: Export VM definition and disk
   echo ""
-  echo "[5/7] Gathering metadata..."
+  echo "[4/7] Exporting VM definition and compressing disk..."
+  
+  # Export XML definition
+  sudo virsh dumpxml "$temp_clone" > "$export_dir/vm-definition.xml" || {
+    echo "      ✗ Failed to export VM definition"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir" "$blockchain_export_dir"
+    die "Export failed during VM definition export"
+  }
+  
+  # Convert disk to compressed qcow2
+  echo "      Compressing disk image (this may take several minutes)..."
+  sudo qemu-img convert -c -O qcow2 "$temp_disk" "$export_dir/vm-disk.qcow2" || {
+    echo "      ✗ Failed to compress disk"
+    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
+    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
+    sudo rm -f "$temp_disk" 2>/dev/null || true
+    rm -rf "$export_dir" "$blockchain_export_dir"
+    die "Export failed during disk compression"
+  }
+  
+  local vm_disk_size
+  vm_disk_size=$(du -h "$export_dir/vm-disk.qcow2" | cut -f1)
+  echo "      ✓ VM disk exported and compressed ($vm_disk_size)"
+  
+  # Step 6: Create README and metadata
+  echo ""
+  echo "[5/7] Creating README and metadata..."
   
   # Get VM specs
-  local vm_ram vm_vcpus vm_disk_size
+  local vm_ram vm_vcpus
   vm_ram=$(sudo virsh dominfo "$temp_clone" | grep "Max memory:" | awk '{print $3}')
   vm_vcpus=$(sudo virsh dominfo "$temp_clone" | grep "CPU(s):" | awk '{print $2}')
-  vm_disk_size=$(sudo qemu-img info "$temp_disk" | grep "virtual size:" | awk '{print $3, $4}')
   
-  # Try to get blockchain height from previous status check
-  local blockchain_height="unknown"
-  if [[ -n "$blocks" ]]; then
-    blockchain_height="$blocks"
-  fi
+  cat > "$export_dir/README.txt" << 'EOF'
+Garbageman VM Image Export (NEW MODULAR FORMAT)
+================================================
+
+This archive contains a VM image WITHOUT blockchain data.
+The blockchain must be downloaded separately for a complete import.
+
+Contents:
+---------
+- vm-disk.qcow2: Compressed VM disk image (Alpine Linux + Garbageman)
+- vm-definition.xml: VM definition for libvirt
+- README.txt: This file
+
+What's Included:
+----------------
+- Alpine Linux base system
+- Bitcoin Garbageman (compiled)
+- Tor for hidden service
+- Configured bitcoind service
+
+What's NOT Included:
+--------------------
+- Blockchain data (download separately: gm-blockchain-*.tar.gz.part*)
+- Tor keys (regenerated on first boot)
+- SSH keys (regenerated on first boot)
+- Logs and temporary files
+
+Blockchain Data:
+----------------
+Download matching blockchain export with same timestamp:
+  gm-blockchain-YYYYMMDD-HHMMSS/
+
+Import Instructions:
+====================
+
+Method 1 (Recommended): Use garbageman-vmm.sh
+  ./garbageman-vmm.sh → Create Base VM → Import from file
   
-  # Create metadata JSON
-  local metadata_file="$export_dir/metadata.json"
-  cat > "$metadata_file" <<METADATA
-{
-  "export_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "export_timestamp": "$export_timestamp",
-  "vm_name": "$VM_NAME",
-  "script_name": "garbageman-vmm.sh",
-  "vm_specs": {
-    "ram_mb": "$vm_ram",
-    "vcpus": "$vm_vcpus",
-    "disk_size": "$vm_disk_size",
-    "disk_format": "qcow2"
-  },
-  "blockchain": {
-    "height_at_export": "$blockchain_height",
-    "pruned": true,
-    "prune_target": "750 MiB"
-  },
-  "network_config": {
-    "tor_only": true,
-    "onlynet": "onion",
-    "note": "Fresh Tor keys will be generated on first boot"
-  },
-  "repository": {
-    "url": "$GM_REPO",
-    "branch": "$GM_BRANCH"
-  },
-  "sanitization": {
-    "tor_keys_removed": true,
-    "ssh_keys_removed": true,
-    "peer_databases_cleared": true,
-    "logs_cleared": true,
-    "machine_id_reset": true
-  },
-  "import_notes": [
-    "This VM has been sanitized for secure import",
-    "Tor hidden service keys have been removed - fresh .onion will be generated",
-    "SSH host keys have been removed - will be regenerated on first boot",
-    "Peer databases cleared - VM will discover new peers independently",
-    "Bitcoin configuration reset to generic Tor-only setup",
-    "Recommended: 2+ GB RAM, 1+ vCPU for normal operation",
-    "Initial sync resources were higher, but blockchain is already synced"
-  ]
-}
+  The script will automatically:
+  1. Import the VM image
+  2. Look for matching blockchain data
+  3. Combine them into a complete working VM
+
+Method 2 (Manual):
+  1. Extract this archive
+  2. Download and reassemble blockchain:
+     cd /path/to/blockchain/export
+     cat gm-blockchain.tar.gz.part* > gm-blockchain.tar.gz
+     tar xzf gm-blockchain.tar.gz
+  3. Inject blockchain into VM disk:
+     sudo virt-tar-in -a vm-disk.qcow2 /path/to/blockchain/data /var/lib/bitcoin
+  4. Copy disk to /var/lib/libvirt/images/gm-base.qcow2
+  5. Import VM:
+     sudo virsh define vm-definition.xml
+
+Notes:
+------
+- VM image size: ~500MB-1GB (much smaller than old monolithic format)
+- Blockchain size: ~20GB compressed
+- Total combined: ~21GB (same as before, but now modular)
+- Can update VM image without re-downloading blockchain
+- Can share blockchain between VM and container deployments
+EOF
+
+  # Create metadata
+  cat > "$export_dir/METADATA.txt" <<METADATA
+Export Information
+==================
+
+Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Export Timestamp: $export_timestamp
+Format: Modular (VM image + blockchain parts)
+
+VM Specifications:
+------------------
+Name: $VM_NAME
+RAM: ${vm_ram} KiB
+vCPUs: $vm_vcpus
+Disk Format: qcow2 (compressed)
+
+Blockchain Information:
+-----------------------
+Height at Export: $blockchain_height
+Format: Split into parts (blockchain.tar.gz.part*)
+
+Security & Privacy:
+-------------------
+VM Image Security:
+✓ Blockchain removed from VM image
+✓ Tor keys removed (regenerated on import)
+✓ SSH keys removed (regenerated on import)
+✓ System logs cleared
+✓ Machine-id reset
+✓ Generic Tor-only bitcoin.conf
+
+Blockchain Data Security:
+✓ Blockchain sanitized before export
+✓ Peer databases removed (peers.dat, anchors.dat, banlist.dat)
+✓ Tor hidden service keys removed
+✓ Debug logs removed (may contain IP addresses)
+✓ Wallet files removed (none should exist on pruned node)
+✓ Mempool and fee estimate data removed
+✓ Lock files and PIDs removed
+
+SAFE FOR PUBLIC DISTRIBUTION - No identifying information included.
+
+Companion Files:
+----------------
+This VM image pairs with blockchain data:
+  blockchain.tar.gz.part01, part02, etc.
+
+All files are included in this unified export folder.
 METADATA
-  echo "      ✓ Metadata created: metadata.json"
   
-  # Step 6: Copy disk image to export directory and compress
+  echo "      ✓ README and metadata created"
+  
+  # Step 7: Create VM image archive within export folder
   echo ""
-  echo "[6/7] Copying and compressing disk image..."
-  echo "      This will take several minutes (10-15 GB)..."
+  echo "[6/7] Creating VM image archive..."
+  local vm_archive_name="vm-image-${export_timestamp}.tar.gz"
+  local vm_archive_path="$export_dir/${vm_archive_name}"
   
-  # Copy the qcow2 disk to export directory
-  sudo cp "$temp_disk" "$export_dir/${VM_NAME}.qcow2" || {
-    echo "      ✗ Failed to copy disk image"
+  # Archive the VM files (excluding blockchain parts and manifest)
+  local temp_vm_dir="$export_dir/.tmp-vm"
+  mkdir -p "$temp_vm_dir"
+  mv "$export_dir"/*.qcow2 "$export_dir"/*.xml "$export_dir"/*METADATA.txt "$export_dir"/README.txt "$temp_vm_dir/" 2>/dev/null || true
+  
+  tar -czf "$vm_archive_path" -C "$temp_vm_dir" . || {
+    echo "      ✗ Failed to create archive"
     sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
     sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
     sudo rm -f "$temp_disk" 2>/dev/null || true
     rm -rf "$export_dir"
-    die "Export failed during disk copy"
+    die "Export failed during archive creation"
   }
   
-  # Fix ownership so user can access the exported files
-  sudo chown -R "$USER:$USER" "$export_dir"
+  # Remove temporary directory
+  rm -rf "$temp_vm_dir"
   
-  echo "      ✓ Disk image copied"
+  local vm_archive_size
+  vm_archive_size=$(du -h "$vm_archive_path" | cut -f1)
+  echo "      ✓ VM image archived ($vm_archive_size)"
   
-  # Create compressed archive
-  echo "      Creating compressed archive (this may take 10-20 minutes)..."
-  local archive_name="${export_name}.tar.gz"
-  local archive_path="$HOME/Downloads/${archive_name}"
+  # Generate combined checksums for all files
+  echo "      Generating checksums..."
+  (cd "$export_dir" && sha256sum blockchain.tar.gz.part* "${vm_archive_name}" > SHA256SUMS)
   
-  tar -czf "$archive_path" -C "$HOME/Downloads" "$export_name" || {
-    echo "      ✗ Failed to create compressed archive"
-    sudo virsh destroy "$temp_clone" >/dev/null 2>&1 || true
-    sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
-    sudo rm -f "$temp_disk" 2>/dev/null || true
-    rm -rf "$export_dir"
-    die "Export failed during compression"
-  }
+  # Add reassembled blockchain checksum
+  echo "" >> "$export_dir/SHA256SUMS"
+  echo "# Reassembled blockchain checksum:" >> "$export_dir/SHA256SUMS"
+  (cd "$export_dir" && cat blockchain.tar.gz.part* | sha256sum | sed 's/-/blockchain.tar.gz/' >> SHA256SUMS)
   
-  local archive_size
-  archive_size=$(du -h "$archive_path" | cut -f1)
-  echo "      ✓ Archive created: ${archive_name} (${archive_size})"
+  echo "      ✓ Checksums created"
   
-  # Generate SHA256 checksum for archive verification
-  echo "      Generating SHA256 checksum..."
-  local checksum_file="${archive_path}.sha256"
-  (cd "$HOME/Downloads" && sha256sum "${archive_name}" > "${archive_name}.sha256") || {
-    echo "      ⚠ Warning: Failed to generate checksum file"
-  }
-  
-  if [[ -f "$checksum_file" ]]; then
-    echo "      ✓ Checksum created: ${archive_name}.sha256"
-  fi
-  
-  # Step 7: Cleanup
+  # Step 8: Cleanup temporary VM
   echo ""
-  echo "[7/7] Cleaning up temporary files..."
-  
-  # Remove temporary clone
+  echo "[7/7] Cleaning up..."
   sudo virsh undefine "$temp_clone" >/dev/null 2>&1 || true
   sudo rm -f "$temp_disk" 2>/dev/null || true
-  
-  # Remove uncompressed export directory (we have the .tar.gz)
-  rm -rf "$export_dir"
-  
   echo "      ✓ Temporary files removed"
+  
+  # Calculate totals
+  local total_size
+  total_size=$(du -csh "$export_dir"/* 2>/dev/null | tail -n1 | cut -f1)
   
   # Success!
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
-  echo "║                        Export Complete!                                        ║"
+  echo "║                    Modular Export Complete!                                    ║"
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
   echo ""
-  echo "📦 Exported files:"
-  echo "   Archive:  $archive_path"
-  echo "   Checksum: ${archive_path}.sha256"
-  echo "   Size:     $archive_size"
+  echo "📦 Unified Export Folder:"
   echo ""
-  echo "📋 Archive contains:"
-  echo "   • ${VM_NAME}.qcow2 (sanitized disk image)"
-  echo "   • metadata.json (VM specifications and import info)"
+  echo "  Location: $export_dir/"
+  echo "  Total Size: $total_size"
   echo ""
-  echo "🔐 Verify integrity after transfer:"
-  echo "   cd ~/Downloads && sha256sum -c ${archive_name}.sha256"
+  echo "  Contents:"
+  echo "    • blockchain/ - Blockchain data split into GitHub-compatible parts"
+  echo "    • ${vm_archive_name} - VM image archive"
+  echo "    • ${vm_archive_name}.sha256 - Image checksum"
   echo ""
-  echo "🔒 Security: All sensitive data has been removed:"
-  echo "   ✓ Tor keys cleared (fresh .onion on import)"
-  echo "   ✓ SSH keys removed (regenerated on import)"
-  echo "   ✓ Peer databases cleared"
-  echo "   ✓ Logs and machine identifiers reset"
+  echo "  Blockchain Components:"
+  echo "    • Parts: $(ls -1 "$blockchain_export_dir"/gm-blockchain.tar.gz.part* 2>/dev/null | wc -l) files"
+  # Success!
   echo ""
-  echo "📤 This archive can be safely transferred to another system."
-  echo "   Use the import feature to create gm-base from this export."
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                    Modular Export Complete!                                    ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "📦 Unified Export Folder:"
+  echo ""
+  echo "  Location: $export_dir/"
+  echo "  Total Size: $total_size"
+  echo ""
+  echo "  Contents:"
+  echo "    • blockchain.tar.gz.part* - Blockchain data split into GitHub-compatible parts"
+  echo "    • ${vm_archive_name} - VM image archive"
+  echo "    • SHA256SUMS - Combined checksums for all files"
+  echo "    • MANIFEST.txt - Export information"
+  echo ""
+  echo "  Blockchain Components:"
+  echo "    • Parts: $(ls -1 "$export_dir"/blockchain.tar.gz.part* 2>/dev/null | wc -l) files"
+  echo ""
+  echo "🔗 Timestamp: $export_timestamp"
+  echo ""
+  echo "📋 Benefits of Unified Export:"
+  echo "   • All components in one folder - easy to manage and transfer"
+  echo "   • Smaller VM image (~1GB vs ~22GB monolithic)"
+  echo "   • Blockchain can be reused across exports"
+  echo "   • Blockchain split for GitHub 2GB limit compatibility"
+  echo ""
+  echo "📤 To Import:"
+  echo "   Use 'Import from file' in garbageman-vmm.sh"
+  echo "   The script will automatically combine both components"
   echo ""
   
-  pause "Export saved to: $archive_path"
+  pause "Export complete!\n\nUnified export folder: $export_dir/"
 }
 
 ################################################################################
@@ -3936,10 +5691,10 @@ clone_menu(){
   detect_host_resources
   local suggested="$HOST_SUGGEST_CLONES"
   local prompt="How many clones to create now?
-Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB
-Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB
+Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB / ${HOST_DISK_GB} GB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB / ${RESERVE_DISK_GB} GB
+Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB / ${AVAIL_DISK_GB} GB
 
-Post-sync per-VM: vCPUs=${VM_VCPUS}, RAM=${VM_RAM_MB} MiB
+Post-sync per-VM: vCPUs=${VM_VCPUS}, RAM=${VM_RAM_MB} MiB, Disk=${VM_DISK_SPACE_GB} GB
 Suggested clones alongside the base: ${suggested}"
   local count
   count=$(whiptail --inputbox "$prompt" 18 90 "$suggested" 3>&1 1>&2 2>&3) || return
@@ -4171,7 +5926,7 @@ show_onion(){
 
 
 ################################################################################
-# Quick VM Controls (Action 3)
+# Manage Base VM (Action 3)
 ################################################################################
 
 # quick_control: Simple start/stop/status/export/delete menu for base VM
@@ -4179,14 +5934,15 @@ show_onion(){
 # Features:
 #   - Displays VM state in menu header
 #   - If VM is running, shows .onion address and block height (like clone management)
-#   - Provides start/stop/state/export/delete actions
+#   - Provides start/stop/status/export/delete actions
 # Actions:
-#   - start: Power on the VM (virsh start)
-#   - stop: Graceful shutdown (virsh shutdown)
-#   - state: Display current VM state and IP address
-#   - export: Create sanitized, portable export for transfer to another system
-#   - delete: Permanently delete VM and disk (requires double confirmation)
-#   - back: Return to main menu
+#   - 1: Start VM (virsh start)
+#   - 2: Stop VM gracefully (virsh shutdown)
+#   - 3: Check status - display current VM state and live monitoring
+#   - 4: Export VM for transfer (creates modular export)
+#   - 5: Delete VM permanently (requires two-step confirmation: yes/no + type VM name)
+#   - 6: Return to main menu
+# Export Format: NEW MODULAR (creates 2 separate components for efficiency)
 # Loop: Menu stays open after actions (user must select "back" to exit)
 quick_control(){
   while true; do
@@ -4227,33 +5983,33 @@ quick_control(){
     fi
     
     local sub
-    sub=$(whiptail --title "Quick VM Controls" --menu "Control VM: ${VM_NAME}\nCurrent state: ${current_state}${extra_info}\n\nChoose an action:" 24 78 8 \
-          "start" "Power on the VM" \
-          "stop" "Gracefully shutdown the VM" \
-          "state" "Check current VM status" \
-          "export" "Export VM for transfer to another system" \
-          "delete" "Delete VM permanently (requires confirmation)" \
-          "back" "Return to main menu" \
+    sub=$(whiptail --title "Manage VM: ${VM_NAME}" --menu "VM state: ${current_state}${extra_info}\n\nChoose an action:" 24 78 8 \
+          1 "Start VM" \
+          2 "Stop VM (graceful)" \
+          3 "Check Status (live monitor)" \
+          4 "Export VM (for transfer)" \
+          5 "Delete VM (permanent)" \
+          6 "Back to Main Menu" \
           3>&1 1>&2 2>&3) || return
     case "$sub" in
-      start) 
+      1) 
         sudo virsh start "$VM_NAME" >/dev/null || true
         pause "VM '${VM_NAME}' has been started (if it wasn't already running)."
         ;;
-      stop)  
+      2)
         sudo virsh shutdown "$VM_NAME" || true
         pause "Shutdown command sent to VM '${VM_NAME}'."
         ;;
-      state) 
+      3)
         monitor_vm_status "$VM_NAME"
         ;;
-      export)
+      4)
         export_base_vm
         ;;
-      delete)
+      5)
         # Confirmation dialog with strong warning
-        if whiptail --title "⚠️  DELETE BASE VM" \
-          --yesno "Are you SURE you want to delete '${VM_NAME}'?\n\n⚠️  WARNING: This action is PERMANENT and IRREVERSIBLE!\n\nThis will:\n• Destroy the VM definition\n• Delete the disk image (all blockchain data)\n• Remove all configuration\n\nYou will need to rebuild or re-import to use this VM again.\n\nProceed to confirmation step?" \
+        if whiptail --title "Confirm Deletion" \
+          --yesno "Are you SURE you want to PERMANENTLY DELETE '${VM_NAME}'?\n\n⚠️  WARNING: This action is IRREVERSIBLE!\n\nThis will:\n• Destroy the VM definition\n• Delete the disk image (all blockchain data)\n• Remove all configuration\n\nYou will need to rebuild or re-import to use this VM again.\n\nProceed to confirmation step?" \
           20 78; then
           
           # Secondary confirmation - require typing VM name
@@ -4293,7 +6049,7 @@ quick_control(){
           pause "Deletion cancelled."
         fi
         ;;
-      back)
+      6)
         return
         ;;
       *) : ;;
@@ -4303,28 +6059,3400 @@ quick_control(){
 
 
 ################################################################################
+# Container Implementation Stubs
+################################################################################
+# The following functions provide container-based equivalents of VM operations.
+# These are functional stubs that guide implementation.
+
+# create_base_container: Main entry point for creating base container
+# Purpose: Offers choice between importing from GitHub, importing from file, or building from scratch
+# Flow:
+#   1. Check if container already exists (abort if it does)
+#   2. Present menu: "Import from GitHub", "Import from file", or "Build from scratch"
+#   3. Call appropriate function based on selection
+create_base_container(){
+  # Check if container already exists
+  if container_exists "$CONTAINER_NAME" 2>/dev/null; then
+    whiptail --title "Container Exists" --msgbox \
+      "Container '$CONTAINER_NAME' already exists.\n\nTo recreate it:\n1. Delete the existing container first\n2. Use 'Manage Base Container' → 'Delete'\n\nOr use 'Manage Base Container' to control the existing one." 14 78
+    return
+  fi
+  
+  # Present choice menu
+  local choice
+  choice=$(whiptail --title "Create Base Container" \
+    --menu "How would you like to create the base container?\n\nOptions:" 18 78 3 \
+    "1" "Import from GitHub Release (download pre-built)" \
+    "2" "Import from file (use local export)" \
+    "3" "Build from scratch (compile Garbageman)" \
+    3>&1 1>&2 2>&3) || return
+  
+  case "$choice" in
+    1) import_from_github_container ;;
+    2) import_base_container ;;
+    3) create_base_container_from_scratch ;;
+    *) return ;;
+  esac
+}
+
+# create_base_container_from_scratch: Build base container from scratch using Dockerfile
+# Purpose: Build Garbageman container image with Alpine Linux, Tor, and bitcoind
+# Process:
+#   1. Configure defaults (CPU/RAM/network settings)
+#   2. Create temporary build directory with Dockerfile, entrypoint, and bitcoin.conf
+#   3. Multi-stage Docker build compiles Garbageman from source (~2 hours)
+#   4. Inject bitcoin.conf into volume (same approach as imports for consistency)
+#   5. Create and start container with command override to use volume-based config
+# Similar to create_base_vm_from_scratch() but uses container technology instead of VMs
+# Note: bitcoin.conf is embedded in image for reference but overridden by volume-based config
+create_base_container_from_scratch(){
+  # Let user configure defaults (container-specific prompts)
+  if ! configure_defaults_container; then
+    return
+  fi
+  
+  # Prompt for initial sync resources
+  if ! prompt_sync_resources_container; then
+    return
+  fi
+  
+  # Start sudo keepalive for long build process
+  sudo_keepalive_start force
+  
+  ensure_tools
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                     Building Base Container                                    ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "This will:"
+  echo "  1. Create a Dockerfile for Alpine Linux with Garbageman"
+  echo "  2. Build the container image (includes compiling Bitcoin - takes 2+ hours)"
+  echo "  3. Configure Tor and bitcoind"
+  echo "  4. Inject bitcoin.conf into volume"
+  echo "  5. Create and start the container"
+  echo ""
+  echo "Container will use:"
+  echo "  • Initial sync: ${SYNC_VCPUS} CPUs, ${SYNC_RAM_MB}MB RAM"
+  echo "  • After sync: ${VM_VCPUS} CPUs, ${VM_RAM_MB}MB RAM"
+  echo "  • Network: ${CLEARNET_OK} clearnet during sync (clones are Tor-only)"
+  echo ""
+  
+  if ! whiptail --title "Confirm Container Creation" --yesno \
+    "Ready to build base container?\n\nThis process takes 2+ hours.\n\nProceed?" 12 78; then
+    return
+  fi
+  
+  # Create temporary build directory
+  local build_dir
+  build_dir=$(mktemp -d -t gm-container-build-XXXXXX)
+  trap "sudo rm -rf '$build_dir' 2>/dev/null || rm -rf '$build_dir'" RETURN EXIT INT TERM
+  
+  echo ""
+  echo "[1/6] Creating Dockerfile..."
+  
+  # Determine bitcoin.conf based on CLEARNET_OK
+  local bitcoin_conf_content
+  if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+    # Clearnet + Tor: Allow both IPv4 and onion, proxy only for onion connections
+    bitcoin_conf_content="server=1
+prune=750
+dbcache=450
+maxconnections=25
+listen=1
+bind=0.0.0.0
+onlynet=onion
+onlynet=ipv4
+listenonion=1
+discover=1
+dnsseed=1
+proxy=127.0.0.1:9050
+torcontrol=127.0.0.1:9051
+[main]"
+  else
+    # Tor-only: Force all connections through Tor
+    bitcoin_conf_content="server=1
+prune=750
+dbcache=450
+maxconnections=25
+onlynet=onion
+proxy=127.0.0.1:9050
+listen=1
+bind=0.0.0.0
+listenonion=1
+discover=0
+dnsseed=0
+torcontrol=127.0.0.1:9051
+[main]"
+  fi
+  
+  # Create Dockerfile
+  cat > "$build_dir/Dockerfile" <<'DOCKERFILE'
+FROM alpine:3.18
+
+# Install runtime and build dependencies
+RUN apk update && apk add --no-cache \
+    bash \
+    su-exec \
+    shadow \
+    ca-certificates \
+    busybox-extras \
+    cmake \
+    g++ \
+    gcc \
+    make \
+    git \
+    boost-dev \
+    libevent-dev \
+    zeromq-dev \
+    sqlite-dev \
+    linux-headers
+
+# Create bitcoin user and group (tor user/group will be created when Tor is installed later)
+RUN addgroup -S bitcoin && \
+    adduser -S -G bitcoin bitcoin
+
+# Create directories
+RUN mkdir -p /var/lib/bitcoin /etc/bitcoin
+
+# Clone and build Garbageman
+WORKDIR /tmp/garbageman
+RUN git clone --branch GM_BRANCH --depth 1 GM_REPO . && \
+    cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_GUI=OFF \
+        -DWITH_ZMQ=ON \
+        -DBUILD_TESTS=OFF \
+        -DBUILD_BENCH=OFF && \
+    cmake --build build -j$(nproc) && \
+    install -m 0755 build/bin/bitcoind /usr/local/bin/ && \
+    install -m 0755 build/bin/bitcoin-cli /usr/local/bin/ && \
+    cd / && rm -rf /tmp/garbageman
+
+# Remove build dependencies to reduce image size
+RUN apk del cmake g++ gcc make git boost-dev linux-headers && \
+    rm -rf /var/cache/apk/*
+
+# Install Tor and configure user/group access
+# Note: Alpine 3.18 tor package creates tor user (UID 101) with nogroup (GID 65533)
+# Bitcoin group gets GID 101, so tor group will be GID 102
+# We create tor group and change tor user's primary group from 65533 to 102
+RUN apk add --no-cache tor && \
+    addgroup -S tor && \
+    sed -i 's/tor:x:101:65533:/tor:x:101:102:/' /etc/passwd && \
+    addgroup bitcoin tor && \
+    mkdir -p /var/lib/tor/bitcoin-service && \
+    chown -R tor:tor /var/lib/tor && \
+    chmod 700 /var/lib/tor && \
+    chmod 700 /var/lib/tor/bitcoin-service
+
+# Configure Tor (bind to localhost only - no external exposure needed)
+RUN echo "SOCKSPort 127.0.0.1:9050" >> /etc/tor/torrc && \
+    echo "ControlPort 127.0.0.1:9051" >> /etc/tor/torrc && \
+    echo "CookieAuthentication 1" >> /etc/tor/torrc && \
+    echo "DataDirectory /var/lib/tor" >> /etc/tor/torrc && \
+    echo "HiddenServiceDir /var/lib/tor/bitcoin-service" >> /etc/tor/torrc && \
+    echo "HiddenServicePort 8333 127.0.0.1:8333" >> /etc/tor/torrc
+
+# Copy configuration files
+# NOTE: This bitcoin.conf is embedded in the image but not used at runtime.
+# Actual config is injected into the volume at /var/lib/bitcoin/bitcoin.conf
+# during container creation. This file exists only for documentation/reference.
+COPY bitcoin.conf /etc/bitcoin/bitcoin.conf
+COPY entrypoint.sh /entrypoint.sh
+
+# Set ownership and permissions
+RUN chown -R bitcoin:bitcoin /var/lib/bitcoin /etc/bitcoin && \
+    chmod 644 /etc/bitcoin/bitcoin.conf && \
+    chmod +x /entrypoint.sh
+
+# Bitcoin data volume
+VOLUME ["/var/lib/bitcoin"]
+
+# Ensure /usr/local/bin is in PATH for all users
+ENV PATH="/usr/local/bin:$PATH"
+
+EXPOSE 8333 9050
+
+ENTRYPOINT ["/entrypoint.sh"]
+# Default CMD (overridden at container creation to use volume-based config)
+CMD ["bitcoind", "-conf=/etc/bitcoin/bitcoin.conf", "-datadir=/var/lib/bitcoin"]
+DOCKERFILE
+
+  # Replace placeholders in Dockerfile
+  sed -i "s|GM_REPO|$GM_REPO|g" "$build_dir/Dockerfile"
+  sed -i "s|GM_BRANCH|$GM_BRANCH|g" "$build_dir/Dockerfile"
+  
+  # Create entrypoint script with graceful shutdown handling
+  # Key features:
+  #   - Starts Tor and bitcoind in background
+  #   - Traps SIGTERM/SIGINT for graceful shutdown
+  #   - Sends bitcoin-cli stop and waits up to 180s for clean exit
+  #   - Ensures blockchain data is properly flushed before container stops
+  cat > "$build_dir/entrypoint.sh" <<'ENTRYPOINT'
+#!/bin/bash
+set -e
+
+echo "=== Garbageman Container Starting ==="
+echo "Date: $(date)"
+echo ""
+
+# Ensure Tor directories exist with correct ownership BEFORE starting Tor
+echo "Setting up Tor directories..."
+mkdir -p /var/lib/tor/bitcoin-service
+chown -R tor:tor /var/lib/tor
+chmod 700 /var/lib/tor
+chmod 700 /var/lib/tor/bitcoin-service
+
+# Start Tor in background as tor user
+echo "Starting Tor..."
+su-exec tor tor -f /etc/tor/torrc &
+TOR_PID=$!
+echo "Tor PID: $TOR_PID"
+
+# Wait for Tor to be ready
+echo "Waiting for Tor SOCKS proxy on 127.0.0.1:9050..."
+for i in {1..30}; do
+  if nc -z 127.0.0.1 9050 2>/dev/null; then
+    echo "✓ Tor SOCKS proxy is ready"
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo "⚠️  Warning: Tor SOCKS proxy not responding after 30 seconds"
+    echo "Continuing anyway..."
+  fi
+  sleep 1
+done
+
+# Ensure bitcoin directories exist with correct permissions
+echo "Setting up Bitcoin directories..."
+mkdir -p /var/lib/bitcoin
+chown -R bitcoin:bitcoin /var/lib/bitcoin
+
+# Display config for debugging
+echo ""
+echo "Bitcoin configuration:"
+if [ -f /var/lib/bitcoin/bitcoin.conf ]; then
+  echo "✓ bitcoin.conf found at /var/lib/bitcoin/bitcoin.conf (volume-based, ACTIVE)"
+  echo "  Key settings:"
+  grep -E '^(server|daemon|prune|onlynet|proxy)=' /var/lib/bitcoin/bitcoin.conf 2>/dev/null || echo "  (no settings found)"
+elif [ -f /etc/bitcoin/bitcoin.conf ]; then
+  echo "✓ bitcoin.conf found at /etc/bitcoin/bitcoin.conf (image-based, FALLBACK)"
+  echo "  Key settings:"
+  grep -E '^(server|daemon|prune|onlynet|proxy)=' /etc/bitcoin/bitcoin.conf 2>/dev/null || echo "  (no settings found)"
+else
+  echo "⚠️  Warning: bitcoin.conf not found"
+fi
+
+# Signal handler for graceful shutdown
+shutdown_handler() {
+  echo ""
+  echo "=== Shutdown signal received ==="
+  echo "Stopping bitcoind gracefully..."
+  
+  # Try to stop bitcoind gracefully using bitcoin-cli
+  if su-exec bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin stop 2>/dev/null; then
+    echo "✓ Sent stop command to bitcoind"
+    
+    # Wait up to 180 seconds (3 minutes) for bitcoind to exit
+    for i in {1..180}; do
+      if ! pgrep -x bitcoind >/dev/null 2>&1; then
+        echo "✓ bitcoind stopped gracefully"
+        break
+      fi
+      if [ $i -eq 180 ]; then
+        echo "⚠️  Warning: bitcoind did not stop within 3 minutes"
+      fi
+      sleep 1
+    done
+  else
+    echo "⚠️  Could not send stop command to bitcoind"
+  fi
+  
+  # Stop Tor
+  if [ -n "$TOR_PID" ] && kill -0 $TOR_PID 2>/dev/null; then
+    echo "Stopping Tor (PID: $TOR_PID)..."
+    kill $TOR_PID 2>/dev/null || true
+    wait $TOR_PID 2>/dev/null || true
+    echo "✓ Tor stopped"
+  fi
+  
+  echo "=== Shutdown complete ==="
+  exit 0
+}
+
+# Trap SIGTERM and SIGINT for graceful shutdown
+trap shutdown_handler SIGTERM SIGINT
+
+# Start bitcoind as bitcoin user
+echo ""
+echo "Starting bitcoind as user 'bitcoin'..."
+echo "Command: $@"
+echo ""
+export PATH="/usr/local/bin:$PATH"
+
+# Start bitcoind in background so we can handle signals
+su-exec bitcoin "$@" &
+BITCOIND_PID=$!
+echo "bitcoind PID: $BITCOIND_PID"
+
+# Wait for bitcoind to exit (or signal to arrive)
+wait $BITCOIND_PID
+ENTRYPOINT
+  
+  # Create bitcoin.conf file
+  cat > "$build_dir/bitcoin.conf" <<BTCCONF
+$bitcoin_conf_content
+BTCCONF
+  
+  echo "    ✓ Dockerfile created"
+  
+  # Build the container image
+  echo ""
+  echo "[2/6] Building container image..."
+  echo "      This will take 2+ hours (compiling Bitcoin from source)"
+  echo "      Note: Using --no-cache to ensure fresh build"
+  echo ""
+  
+  local runtime
+  runtime=$(container_runtime)
+  
+  if ! container_cmd build --no-cache -t "$CONTAINER_IMAGE" "$build_dir" 2>&1 | while IFS= read -r line; do
+    echo "      $line"
+  done; then
+    echo ""
+    echo "❌ Container build failed"
+    return 1
+  fi
+  
+  echo ""
+  echo "    ✓ Container image built successfully"
+  
+  # Create data volume
+  echo ""
+  echo "[3/6] Creating data volume..."
+  container_cmd volume create "garbageman-data" >/dev/null 2>&1 || true
+  echo "    ✓ Data volume created"
+  
+  # Inject bitcoin.conf into volume (same approach as imports for consistency)
+  echo ""
+  echo "[4/6] Injecting bitcoin.conf into volume..."
+  local temp_conf=$(mktemp)
+  echo "$bitcoin_conf_content" > "$temp_conf"
+  
+  if container_cmd run --rm \
+    -v garbageman-data:/data \
+    -v "$temp_conf:/bitcoin.conf:ro" \
+    alpine:3.18 \
+    sh -c 'cp /bitcoin.conf /data/bitcoin.conf && chmod 644 /data/bitcoin.conf' 2>/dev/null; then
+    echo "    ✓ bitcoin.conf injected into volume at /var/lib/bitcoin/bitcoin.conf"
+  else
+    echo "    ⚠️  Warning: Failed to inject bitcoin.conf, will use image default"
+  fi
+  rm -f "$temp_conf"
+  
+  # Create and start container with command override
+  echo ""
+  echo "[5/6] Creating container..."
+  
+  # Calculate CPU and memory limits
+  local cpu_limit="${SYNC_VCPUS}.0"
+  local mem_limit="${SYNC_RAM_MB}m"
+  
+  # Override CMD to use volume-based config for consistency with imports/clones
+  if ! container_cmd run -d \
+    --name "$CONTAINER_NAME" \
+    --cpus="$cpu_limit" \
+    --memory="$mem_limit" \
+    -v garbageman-data:/var/lib/bitcoin \
+    --restart unless-stopped \
+    "$CONTAINER_IMAGE" \
+    bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin 2>&1 | while IFS= read -r line; do
+      echo "      $line"
+    done; then
+    echo ""
+    echo "❌ Failed to create container"
+    return 1
+  fi
+  
+  echo "    ✓ Container created and started"
+  
+  # Wait for container to be ready
+  echo ""
+  echo "[6/6] Waiting for container to initialize..."
+  sleep 5
+  
+  local container_state
+  container_state=$(container_state "$CONTAINER_NAME")
+  
+  if [[ "$container_state" != "up" ]]; then
+    echo ""
+    echo "⚠️  Container is not running (state: $container_state)"
+    echo "    Check logs: $runtime logs $CONTAINER_NAME"
+    return 1
+  fi
+  
+  echo "    ✓ Container is running"
+  
+  # Success!
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                      Container Created Successfully!                           ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "✅ Base container '$CONTAINER_NAME' is ready!"
+  echo ""
+  echo "📋 Configuration:"
+  echo "   Resources: ${SYNC_VCPUS} CPUs, ${SYNC_RAM_MB}MB RAM (initial sync)"
+  echo "   Network: ${CLEARNET_OK} clearnet during sync"
+  echo "   Image: $CONTAINER_IMAGE"
+  echo ""
+  echo "📌 Next steps:"
+  echo "   1. Choose 'Monitor Base Container Sync' to check sync progress"
+  echo "   2. Once synced, clone the container for additional nodes"
+  echo ""
+  
+  pause "Container '$CONTAINER_NAME' created successfully!\n\nChoose 'Monitor Base Container Sync' to track IBD progress."
+}
+
+# get_peer_breakdown_container: Analyze peer user agents in container and categorize them
+# Args: $1 = Container name
+# Returns: Formatted string like "21 (5 LR/GM, 3 KNOTS, 2 OLDCORE, 7 COREv30+, 4 OTHER)"
+# Categories match VM version for consistency
+get_peer_breakdown_container(){
+  local container_name="$1"
+  local peerinfo
+  
+  # Get detailed peer information from container
+  peerinfo=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getpeerinfo 2>/dev/null || echo "[]")
+  
+  # Count total peers
+  local total=$(echo "$peerinfo" | jq 'length' 2>/dev/null || echo 0)
+  
+  if [[ "$total" -eq 0 ]]; then
+    echo "0"
+    return
+  fi
+  
+  # Initialize counters
+  local lr_gm=0 knots=0 oldcore=0 core30plus=0 other=0
+  
+  # Parse each peer's user agent and services
+  while IFS= read -r peer; do
+    local subver=$(echo "$peer" | jq -r '.subver // ""' 2>/dev/null)
+    local services=$(echo "$peer" | jq -r '.services // ""' 2>/dev/null)
+    
+    # Check for Libre Relay bit (0x0400 = 1024 in decimal)
+    # Services is a hex string like "000000000000040d"
+    if [[ -n "$services" ]]; then
+      local services_dec=$((16#${services}))
+      if (( (services_dec & 0x0400) != 0 )); then
+        ((lr_gm++))
+        continue
+      fi
+    fi
+    
+    # Check user agent string patterns
+    if [[ "$subver" =~ [Kk]nots ]]; then
+      ((knots++))
+    elif [[ "$subver" =~ /Satoshi:([0-9]+)\. ]]; then
+      local version="${BASH_REMATCH[1]}"
+      if [[ "$version" -ge 30 ]]; then
+        ((core30plus++))
+      else
+        ((oldcore++))
+      fi
+    else
+      ((other++))
+    fi
+  done < <(echo "$peerinfo" | jq -c '.[]' 2>/dev/null)
+  
+  # Build the breakdown string - always show all categories
+  local breakdown="$total ($lr_gm LR/GM, $knots KNOTS, $oldcore OLDCORE, $core30plus COREv30+, $other OTHER)"
+  
+  echo "$breakdown"
+}
+
+# monitor_container_sync: Monitor IBD sync progress in container with live updates
+# Purpose: Display real-time sync progress with automatic refresh
+# Process:
+#   1. Start container if not running
+#   2. Poll bitcoin-cli getblockchaininfo every 5 seconds
+#   3. Display blocks, headers, sync progress, verification progress, peers
+#   4. Detect and handle stale tip warnings (no progress for 60+ seconds)
+#   5. Auto-downsizes container resources when sync completes
+# Similar to monitor_sync() but uses container_exec instead of SSH
+# User can press 'q' to exit (container continues running)
+monitor_container_sync(){
+  ensure_tools
+  
+  if ! container_exists "$CONTAINER_NAME"; then
+    die "Container '$CONTAINER_NAME' not found.\n\nCreate it first with 'Create Base Container'."
+  fi
+  
+  # Check if container is running
+  local container_state_now
+  container_state_now=$(container_state "$CONTAINER_NAME")
+  
+  if [[ "$container_state_now" == "up" ]]; then
+    # Container is already running - prompt for resource changes
+    echo "Container '$CONTAINER_NAME' is already running."
+    echo ""
+    
+    # Get current container resource limits
+    local current_cpus current_ram_mb
+    local runtime=$(container_runtime)
+    
+    if [[ "$runtime" == "docker" ]]; then
+      # Docker inspect returns CPUs as string like "2.000000"
+      current_cpus=$(docker inspect --format='{{.HostConfig.NanoCpus}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
+      if [[ "$current_cpus" == "0" ]]; then
+        # No limit set, use system default (all cores)
+        current_cpus="$HOST_CORES"
+      else
+        # Convert nanocpus to whole CPUs (1 CPU = 1000000000 nanocpus)
+        current_cpus=$((current_cpus / 1000000000))
+      fi
+      
+      # Docker memory is in bytes
+      local mem_bytes
+      mem_bytes=$(docker inspect --format='{{.HostConfig.Memory}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
+      if [[ "$mem_bytes" == "0" ]]; then
+        # No limit set, use system default
+        current_ram_mb="$HOST_RAM_MB"
+      else
+        current_ram_mb=$((mem_bytes / 1024 / 1024))
+      fi
+    else
+      # Podman
+      current_cpus=$(podman inspect --format='{{.HostConfig.NanoCpus}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
+      if [[ "$current_cpus" == "0" ]]; then
+        current_cpus="$HOST_CORES"
+      else
+        current_cpus=$((current_cpus / 1000000000))
+      fi
+      
+      local mem_bytes
+      mem_bytes=$(podman inspect --format='{{.HostConfig.Memory}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
+      if [[ "$mem_bytes" == "0" ]]; then
+        current_ram_mb="$HOST_RAM_MB"
+      else
+        current_ram_mb=$((mem_bytes / 1024 / 1024))
+      fi
+    fi
+
+    detect_host_resources_container
+
+    # Prompt user to confirm or change resources
+    local banner="Host: ${HOST_CORES} cores, ${HOST_RAM_MB} MiB
+Reserve kept: ${RESERVE_CORES} cores, ${RESERVE_RAM_MB} MiB
+Available for sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB
+
+Current container configuration: ${current_cpus} CPUs, ${current_ram_mb} MiB RAM
+(Container is currently running - can update on-the-fly)"
+
+    local new_cpus new_ram_mb
+    new_cpus=$(whiptail --title "Sync CPUs" --inputbox \
+      "$banner\n\nEnter CPUs for this sync session:" \
+      19 78 "${current_cpus}" 3>&1 1>&2 2>&3) || return 1
+    [[ "$new_cpus" =~ ^[0-9]+$ ]] || die "CPUs must be a positive integer."
+    [[ "$new_cpus" -ge 1 ]] || die "CPUs must be at least 1."
+    (( new_cpus <= AVAIL_CORES )) || die "Requested CPUs ($new_cpus) exceeds available after reserve (${AVAIL_CORES})."
+
+    new_ram_mb=$(whiptail --title "Sync RAM (MiB)" --inputbox \
+      "$banner\n\nEnter RAM (MiB) for this sync session:" \
+      19 78 "${current_ram_mb}" 3>&1 1>&2 2>&3) || return 1
+    [[ "$new_ram_mb" =~ ^[0-9]+$ ]] || die "RAM must be a positive integer."
+    [[ "$new_ram_mb" -ge 2048 ]] || die "RAM must be at least 2048 MiB."
+    (( new_ram_mb <= AVAIL_RAM_MB )) || die "Requested RAM (${new_ram_mb} MiB) exceeds available after reserve (${AVAIL_RAM_MB} MiB)."
+
+    # Update container resources if they changed (on-the-fly, no restart needed)
+    if [[ "$new_cpus" != "$current_cpus" ]] || [[ "$new_ram_mb" != "$current_ram_mb" ]]; then
+      echo "Updating container resources (no restart needed)..."
+      # Docker requires memory-swap to be >= memory, set equal to disable swap usage
+      if ! container_cmd update --cpus="$new_cpus" --memory="${new_ram_mb}m" --memory-swap="${new_ram_mb}m" "$CONTAINER_NAME" 2>/tmp/container_update_error.log; then
+        local error_msg
+        error_msg=$(cat /tmp/container_update_error.log 2>/dev/null || echo "Unknown error")
+        rm -f /tmp/container_update_error.log
+        die "Failed to update container resources.\n\nError: $error_msg"
+      fi
+      rm -f /tmp/container_update_error.log
+      echo "✅ Resources updated: ${new_cpus} CPUs, ${new_ram_mb} MiB RAM"
+      sleep 1
+    fi
+  else
+    # Container is stopped - prompt for resource configuration before starting
+    echo "Container is stopped."
+    echo ""
+    
+    detect_host_resources_container
+
+    local banner="Host: ${HOST_CORES} cores, ${HOST_RAM_MB} MiB
+Reserve kept: ${RESERVE_CORES} cores, ${RESERVE_RAM_MB} MiB
+Available for sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB
+
+Suggested for initial sync: ${HOST_SUGGEST_SYNC_VCPUS} CPUs, ${HOST_SUGGEST_SYNC_RAM_MB} MiB RAM"
+
+    local sync_cpus sync_ram_mb
+    sync_cpus=$(whiptail --title "Sync CPUs" --inputbox \
+      "$banner\n\nEnter CPUs for this sync session:" \
+      18 78 "${HOST_SUGGEST_SYNC_VCPUS}" 3>&1 1>&2 2>&3) || return 1
+    [[ "$sync_cpus" =~ ^[0-9]+$ ]] || die "CPUs must be a positive integer."
+    [[ "$sync_cpus" -ge 1 ]] || die "CPUs must be at least 1."
+    (( sync_cpus <= AVAIL_CORES )) || die "Requested CPUs ($sync_cpus) exceeds available after reserve (${AVAIL_CORES})."
+
+    sync_ram_mb=$(whiptail --title "Sync RAM (MiB)" --inputbox \
+      "$banner\n\nEnter RAM (MiB) for this sync session:" \
+      18 78 "${HOST_SUGGEST_SYNC_RAM_MB}" 3>&1 1>&2 2>&3) || return 1
+    [[ "$sync_ram_mb" =~ ^[0-9]+$ ]] || die "RAM must be a positive integer."
+    [[ "$sync_ram_mb" -ge 2048 ]] || die "RAM must be at least 2048 MiB."
+    (( sync_ram_mb <= AVAIL_RAM_MB )) || die "Requested RAM (${sync_ram_mb} MiB) exceeds available after reserve (${AVAIL_RAM_MB} MiB)."
+
+    # Start container with configured resources
+    echo "Starting container with ${sync_cpus} CPUs, ${sync_ram_mb} MiB RAM..."
+    container_cmd start "$CONTAINER_NAME" >/dev/null 2>&1 || die "Failed to start container"
+    
+    # Update resources after starting (memory-swap = memory to disable swap)
+    if ! container_cmd update --cpus="$sync_cpus" --memory="${sync_ram_mb}m" --memory-swap="${sync_ram_mb}m" "$CONTAINER_NAME" 2>/tmp/container_update_error.log; then
+      local error_msg
+      error_msg=$(cat /tmp/container_update_error.log 2>/dev/null || echo "Unknown error")
+      rm -f /tmp/container_update_error.log
+      die "Failed to update container resources.\n\nError: $error_msg"
+    fi
+    rm -f /tmp/container_update_error.log
+    
+    sleep 5
+  fi
+  
+  echo ""
+  echo "=========================================="
+  echo "Monitoring Container IBD Progress"
+  echo "Press 'q' to exit (container keeps running)"
+  echo "=========================================="
+  echo ""
+  
+  # Track stale tip detection
+  local stale_tip_detected=false
+  local stale_tip_wait_start=0
+  local stale_tip_initial_blocks=0
+  local wait_count=0
+  local max_wait=12  # Wait up to 60 seconds (12 * 5 seconds)
+  
+  while true; do
+    # Get blockchain info from container
+    local info
+    info=$(container_exec "$CONTAINER_NAME" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null || echo "{}")
+    
+    if [[ "$info" == "{}" ]]; then
+      # Check if bitcoind is actually running in the container
+      local bitcoind_status
+      bitcoind_status=$(container_exec "$CONTAINER_NAME" sh -c 'pgrep -f bitcoind >/dev/null && echo "running" || echo "not running"' 2>/dev/null || echo "unknown")
+      
+      local tor_status
+      tor_status=$(container_exec "$CONTAINER_NAME" sh -c 'pgrep -f tor >/dev/null && echo "running" || echo "not running"' 2>/dev/null || echo "unknown")
+      
+      wait_count=$((wait_count + 1))
+      
+      # Display diagnostic info
+      clear
+      printf "╔════════════════════════════════════════════════════════════════════════════════╗\n"
+      printf "║%-80s║\n" "                    Garbageman IBD Monitor - Starting"
+      printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Container Status:"
+      printf "║%-80s║\n" "    Name:  ${CONTAINER_NAME}"
+      printf "║%-80s║\n" "    Image: ${CONTAINER_IMAGE}"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Service Status:"
+      printf "║%-80s║\n" "    Bitcoin: ${bitcoind_status}"
+      printf "║%-80s║\n" "    Tor:     ${tor_status}"
+      printf "║%-80s║\n" ""
+      
+      if [[ "$bitcoind_status" == "not running" ]]; then
+        printf "║%-80s║\n" "  ⚠ Problem Detected:"
+        printf "║%-80s║\n" "    Bitcoin daemon is not running!"
+        printf "║%-80s║\n" ""
+        printf "║%-80s║\n" "  This usually means there was a problem during import or startup."
+        printf "║%-80s║\n" "  Try deleting and re-creating the container."
+      else
+        printf "║%-80s║\n" "     Waiting for Bitcoin daemon to initialize... ($wait_count/$max_wait)"
+        printf "║%-80s║\n" "     (This can take 1-2 minutes on first start)"
+      fi
+      
+      printf "║%-80s║\n" ""
+      printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+      printf "║%-80s║\n" "  Auto-refreshing every ${POLL_SECS} seconds... Press 'q' to exit"
+      printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
+      
+      if [[ $wait_count -ge $max_wait ]]; then
+        echo ""
+        echo "❌ bitcoind is not responding after $((max_wait * POLL_SECS)) seconds"
+        echo ""
+        pause "bitcoind not responding. Check the diagnostics above for details."
+        return 1
+      fi
+      
+      # Check for 'q' key press
+      if read -t "$POLL_SECS" -n 1 key 2>/dev/null && [[ "$key" == "q" ]]; then
+        echo ""
+        echo "Exiting monitor. Container will continue running in background."
+        return
+      fi
+      continue
+    fi
+    
+    # Parse blockchain info
+    local blocks headers progress ibd peers
+    blocks=$(echo "$info" | jq -r '.blocks // 0' 2>/dev/null || echo "0")
+    headers=$(echo "$info" | jq -r '.headers // 0' 2>/dev/null || echo "0")
+    progress=$(echo "$info" | jq -r '.verificationprogress // 0' 2>/dev/null || echo "0")
+    ibd=$(echo "$info" | jq -r '.initialblockdownload // true' 2>/dev/null || echo "true")
+    
+    # Get peer count
+    peers=$(container_exec "$CONTAINER_NAME" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getconnectioncount 2>/dev/null || echo "0")
+    
+    # Calculate percentage
+    local pct
+    pct=$(awk -v p="$progress" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
+    
+    # Get detailed peer breakdown with categorization
+    local peer_breakdown
+    peer_breakdown=$(get_peer_breakdown_container "$CONTAINER_NAME")
+    
+    # Check for stale tip
+    local current_time=$(date +%s)
+    local time_block
+    time_block=$(echo "$info" | jq -r '.time // 0' 2>/dev/null || echo "0")
+    local block_age_seconds=$((current_time - time_block))
+    local block_age_hours=$((block_age_seconds / 3600))
+    local is_stale=false
+    
+    if [[ "$blocks" -gt 0 && "$time_block" -gt 0 && "$block_age_seconds" -gt 7200 ]]; then
+      is_stale=true
+    fi
+    
+    # Handle stale tip detection - match VM logic for waiting and progress tracking
+    local sync_status_msg=""
+    if [[ "$is_stale" == "true" && "$stale_tip_detected" == "false" ]]; then
+      # Just detected stale tip - start waiting period
+      stale_tip_detected=true
+      stale_tip_wait_start=$current_time
+      stale_tip_initial_blocks=$blocks
+      sync_status_msg="Stale tip detected (${block_age_hours}h old). Waiting for peers to sync..."
+    elif [[ "$stale_tip_detected" == "true" ]]; then
+      # We're in a waiting period for stale tip
+      local wait_elapsed=$((current_time - stale_tip_wait_start))
+      local wait_remaining=$((120 - wait_elapsed))
+      
+      # Check if blocks have increased (catching up)
+      if [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
+        # Blocks are advancing - check if we're caught up
+        if [[ "$is_stale" == "false" ]]; then
+          # Tip is no longer stale, we've caught up to recent blocks
+          stale_tip_detected=false
+          sync_status_msg="Caught up to current tip"
+        else
+          # Still catching up to current (tip still >2h old means more blocks to sync)
+          sync_status_msg="Syncing new blocks (was ${block_age_hours}h behind)..."
+        fi
+      elif [[ "$wait_elapsed" -lt 120 ]]; then
+        # Still waiting for peers and updates (up to 2 minutes)
+        sync_status_msg="Waiting for sync (${wait_remaining}s left, ${peers} peers connected)..."
+      else
+        # Waited 2 minutes and no progress
+        # Check if tip is still stale - if not, we can clear the flag
+        if [[ "$is_stale" == "false" ]]; then
+          # Tip is no longer stale (somehow caught up), clear flag
+          stale_tip_detected=false
+          sync_status_msg="Synced to current tip"
+        else
+          # Still stale, keep waiting indefinitely (don't mark as complete until truly synced)
+          sync_status_msg="Stale tip (${block_age_hours}h old), waiting for peers (${peers} connected)..."
+        fi
+      fi
+    fi
+    
+    # Display status with matching format
+    clear
+    printf "╔════════════════════════════════════════════════════════════════════════════════╗\n"
+    printf "║%-80s║\n" "                    Garbageman IBD Monitor - ${pct}% Complete"
+    printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  Host Resources:"
+    printf "║%-80s║\n" "    Cores: ${HOST_CORES} total | ${RESERVE_CORES} reserved | ${AVAIL_CORES} available"
+    printf "║%-80s║\n" "    RAM:   ${HOST_RAM_MB} MiB total | ${RESERVE_RAM_MB} MiB reserved | ${AVAIL_RAM_MB} MiB available"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  Container Status:"
+    printf "║%-80s║\n" "    Name:  ${CONTAINER_NAME}"
+    printf "║%-80s║\n" "    Image: ${CONTAINER_IMAGE}"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  Bitcoin Sync Status:"
+    printf "║%-80s║\n" "    Blocks:   ${blocks} / ${headers}"
+    printf "║%-80s║\n" "    Progress: ${pct}% (${progress})"
+    printf "║%-80s║\n" "    IBD:      ${ibd}"
+    printf "║%-80s║\n" "    Peers:    ${peer_breakdown}"
+    if [[ -n "$sync_status_msg" ]]; then
+      printf "║%-80s║\n" "    Status:   ${sync_status_msg}"
+    fi
+    printf "║%-80s║\n" ""
+    printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+    printf "║%-80s║\n" "  Auto-refreshing every ${POLL_SECS} seconds... Press 'q' to exit"
+    printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
+    
+    # Check if sync is complete - match VM logic for stale tip handling
+    local should_complete=false
+    if [[ "$ibd" == "false" ]] || [[ "$blocks" -ge "$headers" && "$headers" -gt 0 && "$pct" -ge 99 ]]; then
+      # Basic completion conditions met, but check stale tip status
+      if [[ "$stale_tip_detected" == "false" ]]; then
+        # No stale tip detected or we've finished waiting - OK to complete
+        should_complete=true
+      elif [[ "$blocks" -ge "$headers" && "$pct" -ge 99 && "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
+        # Stale tip was detected AND blocks have advanced past initial AND caught up to headers - complete
+        should_complete=true
+      elif [[ "$blocks" -gt "$stale_tip_initial_blocks" ]]; then
+        # Stale tip was detected and blocks are still advancing - keep waiting
+        should_complete=false
+      else
+        # Stale tip detected, no progress yet - keep waiting (no timeout)
+        should_complete=false
+      fi
+    fi
+    
+    if [[ "$should_complete" == "true" ]]; then
+      # Clear screen before showing completion message
+      clear
+      echo ""
+      echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "                    INITIAL BLOCK DOWNLOAD COMPLETE!"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Your base container (gm-base) is now fully synced with the Bitcoin network."
+      printf "║%-80s║\n" ""
+      echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+      echo ""
+      
+      echo "Stopping container to resize to runtime defaults..."
+      echo ""
+      
+      # Stop container gracefully
+      container_cmd stop "$CONTAINER_NAME" 2>/dev/null || true
+      
+      # Wait up to 3 minutes for graceful shutdown (bitcoind can take time to flush)
+      echo "Waiting for container to stop (this may take up to 3 minutes)..."
+      local shutdown_wait=0
+      while [[ $shutdown_wait -lt 180 ]]; do
+        local state=$(container_state "$CONTAINER_NAME")
+        if [[ "$state" != "up" ]]; then
+          echo "✓ Container stopped gracefully"
+          break
+        fi
+        sleep 5
+        shutdown_wait=$((shutdown_wait + 5))
+        if [[ $((shutdown_wait % 30)) -eq 0 ]]; then
+          echo "  Still waiting... (${shutdown_wait}s elapsed)"
+        fi
+      done
+      
+      # Force stop if still running
+      if [[ "$(container_state "$CONTAINER_NAME")" == "up" ]]; then
+        echo ""
+        echo "⚠ Graceful shutdown timed out after 3 minutes"
+        echo "Force stopping container..."
+        container_cmd kill "$CONTAINER_NAME" 2>/dev/null || true
+        sleep 2
+        if [[ "$(container_state "$CONTAINER_NAME")" != "up" ]]; then
+          echo "✓ Container force stopped"
+        else
+          echo "✗ Failed to stop container. Please check with 'docker ps -a'"
+          read -p "Press Enter to return to main menu..."
+          return
+        fi
+      fi
+      
+      # Resize to runtime defaults
+      echo ""
+      echo "Resizing container to runtime defaults (${VM_VCPUS} CPUs, ${VM_RAM_MB} MiB RAM)..."
+      container_cmd update \
+        --cpus="${VM_VCPUS}" \
+        --memory="${VM_RAM_MB}m" \
+        --memory-swap="${VM_RAM_MB}m" \
+        "$CONTAINER_NAME" 2>/dev/null || true
+      echo "✓ Container resized successfully"
+      
+      # Clear screen and show final message
+      clear
+      echo ""
+      echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "                    CONTAINER READY FOR CLONING!"
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  The base container has been stopped and resized to runtime defaults."
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Next steps:"
+      printf "║%-80s║\n" "    - Choose 'Clone Container(s) from Base' from the main menu"
+      printf "║%-80s║\n" "    - Each clone will have the full blockchain and unique .onion address"
+      printf "║%-80s║\n" "    - Clones are Tor-only for maximum privacy"
+      printf "║%-80s║\n" ""
+      echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+      echo ""
+      read -p "Press Enter to return to main menu..."
+      clear
+      return
+    fi
+    
+    # Use read with timeout - check if user pressed 'q' to exit early
+    read -t "$POLL_SECS" -n 1 key 2>/dev/null || true
+    if [[ "$key" == "q" || "$key" == "Q" ]]; then
+      clear
+      echo ""
+      echo "Monitor stopped. Container is still running."
+      sleep 1
+      return
+    fi
+  done
+  
+  return
+}
+
+# cleanup_orphaned_volumes: Find and remove volumes not used by any container
+# Purpose: Clean up leftover volumes from failed clones or partial operations
+cleanup_orphaned_volumes(){
+  echo ""
+  echo "Scanning for orphaned volumes..."
+  echo ""
+  
+  # Get all volumes that match our naming pattern
+  local all_volumes
+  all_volumes=$(container_cmd volume ls -q | grep -E "^(garbageman-data|gm-clone-.*-data)$" || true)
+  
+  if [[ -z "$all_volumes" ]]; then
+    pause "No garbageman volumes found."
+    return
+  fi
+  
+  # Get all containers (including stopped ones)
+  local all_containers
+  all_containers=$(container_cmd ps -a --format '{{.Names}}' || true)
+  
+  # Check each volume to see if it's attached to a container
+  local orphaned_volumes=()
+  while IFS= read -r vol; do
+    [[ -z "$vol" ]] && continue
+    
+    # Check if any container uses this volume
+    local in_use=false
+    while IFS= read -r container_name; do
+      [[ -z "$container_name" ]] && continue
+      local mounts
+      mounts=$(container_cmd inspect "$container_name" 2>/dev/null | jq -r '.[0].Mounts[].Name // empty' 2>/dev/null || true)
+      if echo "$mounts" | grep -q "^${vol}$"; then
+        in_use=true
+        break
+      fi
+    done <<< "$all_containers"
+    
+    if [[ "$in_use" == "false" ]]; then
+      orphaned_volumes+=("$vol")
+    fi
+  done <<< "$all_volumes"
+  
+  if [[ ${#orphaned_volumes[@]} -eq 0 ]]; then
+    pause "No orphaned volumes found. All volumes are in use."
+    return
+  fi
+  
+  # Show orphaned volumes
+  echo "Found ${#orphaned_volumes[@]} orphaned volume(s):"
+  echo ""
+  for vol in "${orphaned_volumes[@]}"; do
+    local size
+    size=$(container_cmd system df -v 2>/dev/null | grep "$vol" | awk '{print $3}' || echo "unknown")
+    echo "  • $vol (size: $size)"
+  done
+  echo ""
+  
+  if whiptail --title "Clean Up Orphaned Volumes" --yesno \
+    "Remove ${#orphaned_volumes[@]} orphaned volume(s)?\n\n⚠️  This will permanently delete the data.\n\nProceed?" 12 78; then
+    
+    echo ""
+    echo "Removing orphaned volumes..."
+    for vol in "${orphaned_volumes[@]}"; do
+      echo "  Removing: $vol"
+      container_cmd volume rm "$vol" 2>/dev/null || echo "    ⚠️  Failed to remove $vol"
+    done
+    echo ""
+    pause "Cleanup complete."
+  fi
+}
+
+# manage_base_container: Quick controls for base container
+# Purpose: Start/stop/status/export/delete menu for base container
+# Features:
+#   - Start/stop with graceful 180s shutdown timeout
+#   - Live status monitor (auto-refreshing, shows IPv4 if clearnet enabled)
+#   - Export to modular format
+#   - Cleanup orphaned volumes
+#   - Delete with two-step confirmation (yes/no + type container name)
+# Actions:
+#   - 1: Start Container
+#   - 2: Stop Container gracefully (180s timeout)
+#   - 3: Check Status - live monitor with auto-refresh
+#   - 4: Export Container for transfer
+#   - 5: Clean Up Orphaned Volumes
+#   - 6: Delete Container permanently (requires two-step confirmation)
+#   - 7: Return to main menu
+# Similar to quick_control() but for containers
+manage_base_container(){
+  while true; do
+    if ! container_exists "$CONTAINER_NAME"; then
+      pause "Container '$CONTAINER_NAME' does not exist.\n\nCreate it first with 'Create Base Container'."
+      return
+    fi
+    
+    local state
+    state=$(container_state "$CONTAINER_NAME")
+    
+    # Get additional info if running
+    local info_text=""
+    if [[ "$state" == "up" ]]; then
+      local ip blocks onion
+      ip=$(container_ip "$CONTAINER_NAME" || echo "N/A")
+      blocks=$(container_exec "$CONTAINER_NAME" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockcount 2>/dev/null || echo "N/A")
+      onion=$(container_exec "$CONTAINER_NAME" cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null || echo "generating...")
+      
+      info_text="\nRunning info:
+  IP: $ip
+  Blocks: $blocks
+  Onion: $onion"
+    fi
+    
+    local choice
+    choice=$(whiptail --title "Manage Container: $CONTAINER_NAME" --menu \
+      "Container state: $state$info_text\n\nChoose an action:" 22 78 7 \
+      1 "Start Container" \
+      2 "Stop Container (graceful)" \
+      3 "Check Status (live monitor)" \
+      4 "Export Container (for transfer)" \
+      5 "Clean Up Orphaned Volumes" \
+      6 "Delete Container (permanent)" \
+      7 "Back to Main Menu" \
+      3>&1 1>&2 2>&3) || return
+    
+    case "$choice" in
+      1)
+        if [[ "$state" == "up" ]]; then
+          pause "Container is already running."
+        else
+          echo "Starting container..."
+          if container_cmd start "$CONTAINER_NAME"; then
+            sleep 2
+            pause "Container started successfully."
+          else
+            pause "Failed to start container."
+          fi
+        fi
+        ;;
+        
+      2)
+        if [[ "$state" != "up" ]]; then
+          pause "Container is not running."
+        else
+          echo "Stopping container (graceful shutdown, may take up to 3 minutes)..."
+          if container_cmd stop --time=180 "$CONTAINER_NAME"; then
+            pause "Container stopped successfully."
+          else
+            pause "Failed to stop container."
+          fi
+        fi
+        ;;
+        
+      3)
+        monitor_container_status "$CONTAINER_NAME"
+        ;;
+        
+      4)
+        export_base_container
+        ;;
+      
+      5)
+        cleanup_orphaned_volumes
+        ;;
+        
+      6)
+        if whiptail --title "Confirm Deletion" --yesno \
+          "Are you SURE you want to PERMANENTLY DELETE '$CONTAINER_NAME'?\n\n⚠️  WARNING: This action is IRREVERSIBLE!\n\nThis will:\n• Stop and remove the container\n• Remove the container image\n• Delete all blockchain data\n• Clean up dangling build layers\n\nProceed to confirmation step?" 17 78; then
+          
+          # Secondary confirmation - require typing container name
+          local confirm_name
+          confirm_name=$(whiptail --inputbox "Type the exact container name to confirm deletion:\n\nContainer name: ${CONTAINER_NAME}" 12 78 3>&1 1>&2 2>&3)
+          
+          if [[ "$confirm_name" == "$CONTAINER_NAME" ]]; then
+            echo "Deleting container..."
+            container_cmd stop --time=180 "$CONTAINER_NAME" 2>/dev/null || true
+            container_cmd rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            
+            echo "Removing image..."
+            container_cmd rmi -f "$CONTAINER_IMAGE" 2>/dev/null || true
+            
+            echo "Removing data volume..."
+            container_cmd volume rm garbageman-data 2>/dev/null || true
+            
+            echo "Cleaning up dangling images and build cache..."
+            container_cmd image prune -f 2>/dev/null || true
+            if [[ "$(container_runtime)" == "docker" ]]; then
+              container_cmd builder prune -f 2>/dev/null || true
+            fi
+            
+            pause "Container and build cache deleted successfully."
+            return
+          else
+            pause "Deletion cancelled - container name did not match."
+          fi
+        else
+          pause "Deletion cancelled."
+        fi
+        ;;
+        
+      7)
+        return
+        ;;
+    esac
+  done
+}
+
+# clone_container_menu: Create Tor-only container clones with blockchain data copy
+# Purpose: Clone base container with fresh Tor identity and full blockchain data
+# Flow:
+#   1. Ensure base container exists
+#   2. Stop base container if running (ensures consistent data during clone)
+#   3. Prompt for number of clones with capacity-aware suggestions (CPU/RAM/Disk)
+#   4. For each clone:
+#      a. Copy blockchain data from base volume to new volume
+#      b. Prepare Tor-only bitcoin.conf (overrides base configuration)
+#      c. Inject bitcoin.conf into clone volume at /var/lib/bitcoin/bitcoin.conf
+#      d. Create container with command override to use volume-based config
+#      e. Generate fresh Tor hidden service keys
+#      f. Clear peer databases for fresh discovery
+#   5. Restart base container if it was running before cloning
+# Note: Each clone gets unique .onion address, independent peer discovery, Tor-only networking
+#       Clones start with full blockchain (no IBD needed) but fresh network identity
+#       All clones use volume-based config (consistent with imports/from-scratch)
+clone_container_menu(){
+  ensure_tools
+  
+  if ! container_exists "$CONTAINER_NAME"; then
+    die "Base container '$CONTAINER_NAME' not found.\n\nCreate it first with 'Create Base Container'."
+  fi
+  
+  detect_host_resources
+  
+  # Use same resource allocation as VMs for consistency
+  # Users can adjust via "Configure Defaults" if needed
+  local container_vcpus=$VM_VCPUS
+  local container_ram_mb=$VM_RAM_MB
+  
+  # Calculate suggested clones accounting for container overhead
+  # Containers have ~150MB overhead (Docker daemon, networking, etc.)
+  local cpu_capacity=0 mem_capacity=0 disk_capacity=0 total_capacity=0
+  if (( container_vcpus > 0 )); then
+    cpu_capacity=$((AVAIL_CORES / container_vcpus))
+  fi
+  
+  # Account for container overhead in memory calculation
+  local container_overhead_mb=150
+  local effective_ram_per_container=$((container_ram_mb + container_overhead_mb))
+  if (( effective_ram_per_container > 0 )); then
+    mem_capacity=$((AVAIL_RAM_MB / effective_ram_per_container))
+  fi
+  
+  # Calculate disk capacity
+  if (( CONTAINER_DISK_SPACE_GB > 0 )); then
+    disk_capacity=$((AVAIL_DISK_GB / CONTAINER_DISK_SPACE_GB))
+  fi
+  
+  # Take minimum of CPU, RAM, and Disk capacity
+  total_capacity="$cpu_capacity"
+  (( mem_capacity < total_capacity )) && total_capacity="$mem_capacity"
+  (( disk_capacity < total_capacity )) && total_capacity="$disk_capacity"
+  (( total_capacity < 0 )) && total_capacity=0
+  
+  # Determine limiting resource for user feedback
+  local limiting_resource="CPU"
+  (( mem_capacity == total_capacity )) && limiting_resource="RAM"
+  (( disk_capacity == total_capacity )) && limiting_resource="Disk"
+  
+  local suggested=$((total_capacity > 1 ? total_capacity - 1 : 0))
+  (( suggested > 100 )) && suggested=100  # Practical limit
+  
+  local prompt="How many container clones to create?
+
+Host: ${HOST_CORES} cores / ${HOST_RAM_MB}MB / ${HOST_DISK_GB}GB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB}MB / ${RESERVE_DISK_GB}GB
+Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB}MB / ${AVAIL_DISK_GB}GB
+
+Per container: ${container_vcpus} CPU(s), ${container_ram_mb}MB RAM, ${CONTAINER_DISK_SPACE_GB}GB disk
+Capacity: ${cpu_capacity} containers (CPU), ${mem_capacity} containers (RAM), ${disk_capacity} containers (Disk) - limited by ${limiting_resource}
+Suggested clones: ${suggested}
+
+Enter number of clones (or 0 to cancel):"
+  
+  local n
+  n=$(whiptail --inputbox "$prompt" 22 78 "$suggested" 3>&1 1>&2 2>&3) || return
+  [[ "$n" =~ ^[0-9]+$ ]] || { pause "Invalid number."; return; }
+  [[ "$n" -eq 0 ]] && return
+  
+  # === CRITICAL: Stop base container before cloning ===
+  # This ensures consistent data state during clone creation
+  # Similar to VM cloning which requires source VM to be shut off
+  local base_was_running=false
+  local base_state
+  base_state=$(container_state "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+  
+  if [[ "$base_state" == "running" ]]; then
+    base_was_running=true
+    echo ""
+    echo "Base container '$CONTAINER_NAME' is currently running."
+    echo "Stopping it now to ensure consistent cloning..."
+    echo "This may take up to 1 minute for bitcoind to close cleanly."
+    echo ""
+    
+    # Stop gracefully (allows bitcoind to flush databases)
+    container_cmd stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    
+    # Wait up to 60 seconds for graceful stop
+    local timeout=60
+    local elapsed=0
+    while [[ $elapsed -lt $timeout ]]; do
+      base_state=$(container_state "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+      [[ "$base_state" != "running" ]] && break
+      sleep 2
+      elapsed=$((elapsed + 2))
+    done
+    
+    # Force stop if still running after timeout
+    base_state=$(container_state "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
+    if [[ "$base_state" == "running" ]]; then
+      echo "Graceful stop timed out. Forcing stop..."
+      container_cmd kill "$CONTAINER_NAME" >/dev/null 2>&1 || true
+      sleep 2
+    fi
+    
+    echo "Base container stopped successfully."
+    echo ""
+  fi
+  
+  echo ""
+  echo "Creating $n container clone(s)..."
+  echo ""
+  
+  for ((i=1; i<=n; i++)); do
+    # Generate base name with timestamp (format: gm-clone-YYYYMMDD-HHMMSS)
+    local base_name="${CONTAINER_CLONE_PREFIX}-$(date +%Y%m%d-%H%M%S)"
+    local clone_name="$base_name"
+    
+    # Check for name collision (rare, but possible if creating multiple clones per second)
+    # Add numeric suffix (-2, -3, etc.) to ensure uniqueness
+    local suffix=2
+    while container_exists "$clone_name"; do
+      clone_name="${base_name}-${suffix}"
+      ((suffix++))
+    done
+    
+    echo "[$i/$n] Creating clone: $clone_name"
+    
+    # === Step 1: Copy blockchain data from base container's volume ===
+    # Create new volume and copy all blockchain data (matching VM clone behavior)
+    echo "  • Copying blockchain data from base container..."
+    
+    # Create a temporary container to copy data between volumes
+    # We use the same image and mount both volumes to copy data
+    local temp_copy_container="${clone_name}-copy-temp"
+    
+    if ! container_cmd run --rm \
+      -v garbageman-data:/source:ro \
+      -v "${clone_name}-data:/dest" \
+      --name "$temp_copy_container" \
+      alpine:3.18 \
+      sh -c "cp -a /source/. /dest/" 2>/dev/null; then
+      echo "  ❌ Failed to copy blockchain data for $clone_name"
+      # Clean up the volume that was created
+      container_cmd volume rm "${clone_name}-data" 2>/dev/null || true
+      continue
+    fi
+    
+    echo "  • Blockchain data copied successfully"
+    
+    # === Step 2: Prepare Tor-only bitcoin.conf ===
+    # All clones are Tor-only regardless of base configuration
+    # This ensures privacy-preserving operation
+    local temp_config_file="/tmp/${clone_name}-bitcoin.conf"
+    cat > "$temp_config_file" <<'BTCCONF'
+server=1
+prune=750
+dbcache=256
+maxconnections=12
+onlynet=onion
+proxy=127.0.0.1:9050
+listen=1
+bind=0.0.0.0
+listenonion=1
+discover=0
+dnsseed=0
+torcontrol=127.0.0.1:9051
+[main]
+BTCCONF
+    
+    # === Step 3: Inject bitcoin.conf into clone volume ===
+    # Write config to volume (mutable) rather than image (immutable)
+    # This matches the import function's approach
+    if ! container_cmd run --rm \
+      -v "${clone_name}-data:/var/lib/bitcoin" \
+      -v "$temp_config_file:/tmp/bitcoin.conf:ro" \
+      alpine:3.18 \
+      sh -c "cp /tmp/bitcoin.conf /var/lib/bitcoin/bitcoin.conf && chmod 644 /var/lib/bitcoin/bitcoin.conf" 2>/dev/null; then
+      echo "  ⚠️  Warning: Failed to inject bitcoin.conf for $clone_name (will use image default)"
+    fi
+    rm -f "$temp_config_file"
+    
+    # === Step 4: Create container with command override ===
+    # Override CMD to use volume-based config (like imports do)
+    # Container will use the cloned blockchain data and volume-based config
+    if ! container_cmd create \
+      --name "$clone_name" \
+      --cpus="${container_vcpus}.0" \
+      --memory="${container_ram_mb}m" \
+      -v "${clone_name}-data:/var/lib/bitcoin" \
+      --restart unless-stopped \
+      "$CONTAINER_IMAGE" \
+      bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin >/dev/null 2>&1; then
+      echo "  ❌ Failed to create $clone_name"
+      # Clean up the volume since container creation failed
+      container_cmd volume rm "${clone_name}-data" 2>/dev/null || true
+      continue
+    fi
+    
+    # === Step 5: Start container to initialize and clean ===
+    container_cmd start "$clone_name" >/dev/null 2>&1 || true
+    sleep 3  # Give container time to initialize
+    
+    # === Step 6: Remove old Tor hidden service keys ===
+    # This forces generation of a fresh .onion v3 address on next boot
+    # Critical for privacy: each clone must have unique Tor identity
+    container_cmd exec "$clone_name" sh -c "rm -rf /var/lib/tor/bitcoin-service/*" 2>/dev/null || true
+    
+    # === Step 7: Clear peer databases for independent peer discovery ===
+    # This prevents all clones from clustering around the same peer set
+    # Each clone will discover its own independent set of Tor peers
+    container_cmd exec "$clone_name" sh -c "rm -f /var/lib/bitcoin/peers.dat" 2>/dev/null || true
+    container_cmd exec "$clone_name" sh -c "rm -f /var/lib/bitcoin/anchors.dat" 2>/dev/null || true
+    container_cmd exec "$clone_name" sh -c "rm -f /var/lib/bitcoin/banlist.dat" 2>/dev/null || true
+    
+    # === Step 8: Stop clone (leave it stopped like VM clones) ===
+    # Clone is ready but not running - user must start it manually
+    # This matches VM behavior: clones are created in stopped state
+    container_cmd stop "$clone_name" >/dev/null 2>&1 || true
+    sleep 2
+    
+    echo "  ✓ Clone created: $clone_name (stopped)"
+    sleep 1
+  done
+  
+  # === Step 9: Restart base container if it was running ===
+  if [[ "$base_was_running" == true ]]; then
+    echo ""
+    echo "Restarting base container '$CONTAINER_NAME'..."
+    container_cmd start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    sleep 2
+    echo "Base container restarted."
+  fi
+  
+  echo ""
+  pause "$n container clone(s) created successfully!\n\nEach clone has:\n• Unique Tor onion address\n• Tor-only networking\n• Independent peer discovery\n• Cleared peer databases\n• ${container_vcpus} CPU(s), ${container_ram_mb}MB RAM"
+}
+
+# container_management_menu: Manage individual container clones
+# Purpose: List and manage container clones
+# Similar to clone_management_menu() but for containers
+container_management_menu(){
+  while true; do
+    # List all containers matching prefix
+    local clones
+    clones=$(container_cmd ps -a --format '{{.Names}}' | grep "^${CONTAINER_CLONE_PREFIX}" | sort || true)
+    
+    if [[ -z "$clones" ]]; then
+      pause "No container clones found.\n\nCreate clones with 'Create Clone Containers'."
+      return
+    fi
+    
+    # Build menu items
+    local menu_items=()
+    while IFS= read -r clone_name; do
+      local state
+      state=$(container_state "$clone_name")
+      menu_items+=("$clone_name" "State: $state")
+    done <<< "$clones"
+    
+    # Add back option
+    menu_items+=("back" "Return to main menu")
+    
+    local choice
+    choice=$(whiptail --title "Manage Container Clones" --menu \
+      "Select a container clone to manage:" 20 78 10 \
+      "${menu_items[@]}" \
+      3>&1 1>&2 2>&3) || return
+    
+    [[ "$choice" == "back" ]] && return
+    
+    # Manage selected clone
+    manage_container_clone "$choice"
+  done
+}
+
+# monitor_container_status: Live monitoring display for container (base or clone)
+# Purpose: Show real-time status with auto-refresh (container version of monitor_vm_status)
+# Args: $1 = container name to monitor
+# Display: Auto-refreshing every 5 seconds, press 'q' to exit
+# Shows: State, .onion address, blocks/headers, peers, resources
+#        IPv4 address (only for base container with CLEARNET_OK=yes)
+monitor_container_status(){
+  local container_name="$1"
+  
+  echo ""
+  echo "=========================================="
+  echo "Monitoring Container: $container_name"
+  echo "Press 'q' to return to menu"
+  echo "=========================================="
+  echo ""
+  
+  while true; do
+    local state onion blocks headers peers ibd vp pct
+    
+    # Get container state
+    state=$(container_state "$container_name" 2>/dev/null || echo "unknown")
+    
+    # If running, get network info
+    if [[ "$state" == "up" ]]; then
+      # Get .onion address
+      onion=$(container_exec "$container_name" cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null || echo "unknown")
+      
+      # Check if this is the base container and if clearnet is enabled
+      local ipv4_address=""
+      if [[ "$container_name" == "$CONTAINER_NAME" ]] && [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+        # Get IPv4 address for base container when clearnet is enabled
+        ipv4_address=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null | jq -r '.localaddresses[] | select(.network=="ipv4") | .address' 2>/dev/null | head -n1 || echo "")
+        if [[ -z "$ipv4_address" ]]; then
+          # Fallback: try to get from container's network interface
+          ipv4_address=$(container_exec "$container_name" ip -4 addr show eth0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "detecting...")
+        fi
+      fi
+      
+      # Get blockchain info
+      local info
+      info=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null || echo "")
+      blocks=$(jq -r '.blocks // "?"' <<<"$info" 2>/dev/null || echo "?")
+      headers=$(jq -r '.headers // "?"' <<<"$info" 2>/dev/null || echo "?")
+      vp=$(jq -r '.verificationprogress // 0' <<<"$info" 2>/dev/null || echo "0")
+      ibd=$(jq -r '.initialblockdownload // "?"' <<<"$info" 2>/dev/null || echo "?")
+      
+      # Get network info
+      local netinfo
+      netinfo=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null || echo "")
+      peers=$(jq -r '.connections // "?"' <<<"$netinfo" 2>/dev/null || echo "?")
+      
+      # Get detailed peer breakdown
+      local peer_breakdown=$(get_peer_breakdown_container "$container_name")
+      
+      # Calculate percentage
+      pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
+    else
+      onion="N/A"
+      ipv4_address=""
+      blocks="?"
+      headers="?"
+      peers="?"
+      ibd="?"
+      pct=0
+      peer_breakdown="Container not running"
+    fi
+    
+    # Get container resource limits
+    local container_cpus container_mem
+    local inspect_data
+    inspect_data=$(container_cmd inspect "$container_name" 2>/dev/null || echo "")
+    
+    if [[ -n "$inspect_data" ]]; then
+      # Extract CPU limit (NanoCpus / 1e9 = CPU count)
+      local nano_cpus=$(jq -r '.[0].HostConfig.NanoCpus // 0' <<<"$inspect_data" 2>/dev/null || echo "0")
+      if [[ "$nano_cpus" != "0" ]]; then
+        container_cpus=$(awk -v n="$nano_cpus" 'BEGIN{printf "%.1f", n/1000000000}')
+      else
+        container_cpus="unlimited"
+      fi
+      
+      # Extract memory limit (bytes to MiB)
+      local mem_bytes=$(jq -r '.[0].HostConfig.Memory // 0' <<<"$inspect_data" 2>/dev/null || echo "0")
+      if [[ "$mem_bytes" != "0" ]]; then
+        container_mem=$((mem_bytes / 1048576))
+      else
+        container_mem="unlimited"
+      fi
+    else
+      container_cpus="?"
+      container_mem="?"
+    fi
+    
+    detect_host_resources
+    
+    # Clear screen and display
+    clear
+    printf "╔════════════════════════════════════════════════════════════════════════════════╗\n"
+    printf "║%-80s║\n" "                   Container Status Monitor - $container_name"
+    printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  Host Resources:"
+    printf "║%-80s║\n" "    Cores: ${HOST_CORES} total | ${RESERVE_CORES} reserved | ${AVAIL_CORES} available"
+    printf "║%-80s║\n" "    RAM:   ${HOST_RAM_MB} MiB total | ${RESERVE_RAM_MB} MiB reserved | ${AVAIL_RAM_MB} MiB available"
+    printf "║%-80s║\n" ""
+    printf "║%-80s║\n" "  Container Configuration:"
+    printf "║%-80s║\n" "    Name:   $container_name"
+    printf "║%-80s║\n" "    State:  $state"
+    printf "║%-80s║\n" "    CPUs:   $container_cpus"
+    printf "║%-80s║\n" "    RAM:    ${container_mem} MiB"
+    printf "║%-80s║\n" ""
+    
+    if [[ "$state" == "up" ]]; then
+      printf "║%-80s║\n" "  Network Status:"
+      printf "║%-80s║\n" "    Tor:    $onion"
+      if [[ -n "$ipv4_address" ]]; then
+        printf "║%-80s║\n" "    IPv4:   $ipv4_address (clearnet enabled)"
+      fi
+      printf "║%-80s║\n" ""
+      printf "║%-80s║\n" "  Bitcoin Status:"
+      printf "║%-80s║\n" "    Blocks:   $blocks / $headers"
+      printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
+      printf "║%-80s║\n" "    Peers:    $peer_breakdown"
+      printf "║%-80s║\n" ""
+    else
+      printf "║%-80s║\n" "  Container is not running"
+      printf "║%-80s║\n" ""
+    fi
+    
+    printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
+    printf "║%-80s║\n" "  Auto-refreshing every 5 seconds... Press 'q' to exit"
+    printf "╚════════════════════════════════════════════════════════════════════════════════╝\n"
+    
+    # Wait 5 seconds or exit on 'q' press
+    # Note: read returns non-zero on timeout, which is expected behavior
+    if read -t 5 -n 1 key 2>/dev/null; then
+      # Key was pressed
+      if [[ "$key" == "q" || "$key" == "Q" ]]; then
+        clear
+        echo ""
+        echo "Monitor stopped."
+        sleep 1
+        return
+      fi
+    fi
+    # If timeout (no key pressed), loop continues automatically
+  done
+}
+
+# manage_container_clone: Manage individual container clone
+# Args: $1 = clone container name
+# Purpose: Interactive menu for controlling a specific container clone
+# Features:
+#   - Displays container state in menu header
+#   - If running, shows .onion address, IPv4 (if clearnet), and block height
+#   - Provides start/stop/status/delete actions
+# Actions:
+#   1. Start Container - Start the clone container
+#   2. Stop Container (graceful) - Graceful shutdown with 180s timeout
+#   3. Check Status - Show live monitoring (auto-refreshing every 5s)
+#   4. Delete Container (permanent) - Remove container permanently (requires confirmation)
+#   5. Back to Clone List - Return to clone selection menu
+# Loop: Menu stays open after actions (user must select "Back" to exit)
+manage_container_clone(){
+  local clone_name="$1"
+  
+  while true; do
+    if ! container_exists "$clone_name"; then
+      pause "Container '$clone_name' no longer exists."
+      return
+    fi
+    
+    local state
+    state=$(container_state "$clone_name")
+    
+    # Get additional info if running
+    local info_text=""
+    if [[ "$state" == "up" ]]; then
+      local ip blocks onion
+      ip=$(container_ip "$clone_name" || echo "N/A")
+      blocks=$(container_exec "$clone_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockcount 2>/dev/null || echo "N/A")
+      onion=$(container_exec "$clone_name" cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null || echo "generating...")
+      
+      info_text="\nRunning info:
+  IP: $ip
+  Blocks: $blocks
+  Onion: $onion"
+    fi
+    
+    local choice
+    choice=$(whiptail --title "Manage Clone: $clone_name" --menu \
+      "Container state: $state$info_text\n\nChoose an action:" 18 78 6 \
+      1 "Start Container" \
+      2 "Stop Container (graceful)" \
+      3 "Check Status" \
+      4 "Delete Container (permanent)" \
+      5 "Back to Clone List" \
+      3>&1 1>&2 2>&3) || return
+    
+    case "$choice" in
+      1)
+        if [[ "$state" == "up" ]]; then
+          pause "Container '$clone_name' is already running."
+        else
+          echo "Starting container..."
+          if container_cmd start "$clone_name"; then
+            pause "Container started successfully."
+          else
+            pause "Failed to start container."
+          fi
+        fi
+        ;;
+        
+      2)
+        if [[ "$state" != "up" ]]; then
+          pause "Container '$clone_name' is not running."
+        else
+          echo "Stopping container (graceful shutdown, may take up to 3 minutes)..."
+          if container_cmd stop --time=180 "$clone_name"; then
+            pause "Container stopped successfully."
+          else
+            pause "Failed to stop container."
+          fi
+        fi
+        ;;
+        
+      3)
+        monitor_container_status "$clone_name"
+        ;;
+        
+      4)
+        if whiptail --title "Confirm Deletion" --yesno \
+          "Are you sure you want to PERMANENTLY DELETE '$clone_name'?\n\nThis will:\n  - Stop the container\n  - Remove the container\n  - Delete the data volume\n  - Remove all blockchain data for this clone\n\nThis action CANNOT be undone!" 14 78; then
+          
+          echo "Deleting container..."
+          container_cmd stop --time=180 "$clone_name" 2>/dev/null || true
+          container_cmd rm -f "$clone_name" 2>/dev/null || true
+          container_cmd volume rm "${clone_name}-data" 2>/dev/null || true
+          
+          pause "Clone '$clone_name' has been deleted."
+          return
+        fi
+        ;;
+        
+      5)
+        return
+        ;;
+    esac
+  done
+}
+
+# export_base_container: Export container using modular format (NEW MODULAR FORMAT)
+# Purpose: Package container as TWO separate components for efficient distribution
+# Export Components:
+#   1. Container Image (WITHOUT blockchain) - ~500MB
+#      - Alpine Linux + compiled Garbageman
+#      - Configuration files and services
+#      - Sanitized (no blockchain data)
+#   2. Blockchain Data (separate) - ~20GB compressed, split into 1.9GB parts
+#      - Complete blockchain (pruned to 750MB)
+#      - Can be reused across multiple VM/container exports
+#      - GitHub-compatible (parts < 2GB)
+# Security: Removes all sensitive/identifying information from blockchain:
+#   - Bitcoin peer databases (peers.dat, anchors.dat, banlist.dat)
+#   - Tor hidden service keys (forces fresh .onion address on import)
+#   - Bitcoin debug logs (may contain peer IPs and transaction info)
+#   - Wallet files (none should exist on pruned node, but removed as precaution)
+#   - Mempool data (not needed for distribution)
+#   - Lock files and PIDs
+#   - bitcoin.conf (importer will regenerate based on their CLEARNET_OK preference)
+# Flow:
+#   1. Stop container if running (or start temporarily to get block height)
+#   2. Get blockchain height for metadata
+#   3. Export blockchain from volume using temporary container
+#   4. Sanitize blockchain data (remove sensitive files)
+#   5. Compress sanitized blockchain
+#   6. Split blockchain into 1.9GB parts for GitHub
+#   7. Generate blockchain checksums and manifest
+#   8. Export container image using docker/podman save
+#   9. Create container image archive with README
+#   10. Generate checksums for both exports
+# Output: Creates unified export folder in ~/Downloads:
+#   gm-export-YYYYMMDD-HHMMSS/
+#     - blockchain.tar.gz.part01, part02, etc. (sanitized)
+#     - container-image-YYYYMMDD-HHMMSS.tar.gz
+#     - SHA256SUMS
+#     - MANIFEST.txt
+# Benefits: Same as VM export - smaller downloads, shared blockchain, GitHub-compatible
+# SAFE FOR PUBLIC DISTRIBUTION - All identifying information removed
+export_base_container(){
+  if ! container_exists "$CONTAINER_NAME"; then
+    die "Container '$CONTAINER_NAME' not found."
+  fi
+  
+  # Generate export name with timestamp
+  local export_timestamp
+  export_timestamp=$(date +%Y%m%d-%H%M%S)
+  local export_name="gm-export-${export_timestamp}"
+  local export_dir="$HOME/Downloads/${export_name}"
+  
+  # Create export directory (flat structure, no subdirectories)
+  mkdir -p "$export_dir" || die "Failed to create export directory: $export_dir"
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║              Exporting Base Container (Modular Export)                         ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "This will create a unified export folder containing:"
+  echo "  1. Container image (WITHOUT blockchain) - for fast updates"
+  echo "  2. Blockchain data (split into parts) - can be reused across exports"
+  echo ""
+  
+  # Step 1: Get blockchain height (start container if needed)
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 1: Prepare Container"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  echo "[1/3] Getting blockchain height..."
+  local blocks="unknown"
+  local was_running=true
+  
+  if ! container_is_running "$CONTAINER_NAME"; then
+    echo "    Container is stopped, starting temporarily to query blockchain..."
+    was_running=false
+    
+    if ! container_cmd start "$CONTAINER_NAME" >/dev/null 2>&1; then
+      echo "    ⚠️  Failed to start container, block height will be 'unknown'"
+    else
+      # Wait up to 60 seconds for bitcoind to be ready
+      local wait_count=0
+      local max_wait=12  # 12 * 5 = 60 seconds
+      echo "    Waiting for bitcoind to be ready..."
+      
+      while [[ $wait_count -lt $max_wait ]]; do
+        blocks=$(container_exec "$CONTAINER_NAME" /usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockcount 2>/dev/null || echo "")
+        if [[ -n "$blocks" && "$blocks" != "unknown" ]]; then
+          break
+        fi
+        wait_count=$((wait_count + 1))
+        sleep 5
+      done
+      
+      if [[ -z "$blocks" || "$blocks" == "unknown" ]]; then
+        echo "    ⚠️  bitcoind did not respond in time, block height will be 'unknown'"
+        blocks="unknown"
+      fi
+    fi
+  else
+    # Container already running, query directly
+    blocks=$(container_exec "$CONTAINER_NAME" /usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockcount 2>/dev/null || echo "unknown")
+  fi
+  echo "    Block height: $blocks"
+  
+  echo ""
+  echo "[2/3] Ensuring container is stopped..."
+  if ! ensure_container_stopped "$CONTAINER_NAME"; then
+    die "Failed to stop container"
+  fi
+  echo "    ✓ Container stopped"
+  
+  echo ""
+  echo "[3/3] Waiting for clean shutdown..."
+  sleep 2  # Give it a moment to fully release resources
+  echo "    ✓ Ready for export"
+  
+  # Step 2: Export blockchain data (with sanitization)
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 2: Export Blockchain Data (Sanitized)"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Export directly to main folder (flat structure)
+  local blockchain_export_dir="$export_dir"
+  
+  echo "[1/6] Extracting blockchain from volume..."
+  local temp_blockchain="$blockchain_export_dir/.tmp-blockchain"
+  mkdir -p "$temp_blockchain" || die "Failed to create temporary blockchain directory"
+  
+  # First extract to temporary location for sanitization
+  if ! container_cmd run --rm \
+    -v garbageman-data:/data:ro \
+    -v "$temp_blockchain:/backup" \
+    alpine:3.18 \
+    sh -c 'cp -a /data/* /backup/' >/dev/null 2>&1; then
+    sudo rm -rf "$export_dir" 2>/dev/null || rm -rf "$export_dir"
+    die "Failed to export blockchain data"
+  fi
+  
+  echo "    ✓ Blockchain extracted"
+  
+  echo ""
+  echo "[2/6] Sanitizing sensitive data..."
+  # Remove sensitive files that shouldn't be in public exports
+  # Use sudo because files are owned by root (extracted from container)
+  sudo rm -f "$temp_blockchain/peers.dat" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/anchors.dat" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/banlist.dat" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/debug.log" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/.lock" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/onion_private_key" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/onion_v3_private_key" 2>/dev/null || true
+  sudo rm -rf "$temp_blockchain/.cookie" 2>/dev/null || true
+  sudo rm -f "$temp_blockchain/bitcoind.pid" 2>/dev/null || true
+  
+  # Remove any wallet files (shouldn't exist in pruned node, but be safe)
+  sudo rm -f "$temp_blockchain/wallet.dat" 2>/dev/null || true
+  sudo rm -rf "$temp_blockchain/wallets" 2>/dev/null || true
+  
+  # Remove mempool - not needed and may contain transaction info
+  sudo rm -f "$temp_blockchain/mempool.dat" 2>/dev/null || true
+  
+  # Remove bitcoin.conf if it exists in the volume (may contain clearnet preference)
+  # Import will regenerate based on importer's CLEARNET_OK setting
+  sudo rm -f "$temp_blockchain/bitcoin.conf" 2>/dev/null || true
+  
+  echo "    ✓ Sensitive data removed:"
+  echo "      - Peer databases (peers.dat, anchors.dat, banlist.dat)"
+  echo "      - Tor hidden service keys"
+  echo "      - Debug logs and lock files"
+  echo "      - Wallet files (if any)"
+  echo "      - Mempool data"
+  echo "      - bitcoin.conf (importer will regenerate based on their preferences)"
+  
+  echo ""
+  echo "[3/6] Compressing sanitized blockchain..."
+  # Use sudo because files are owned by root (extracted from container)
+  sudo tar czf "$blockchain_export_dir/blockchain-data.tar.gz" -C "$temp_blockchain" . 2>/dev/null || {
+    # Clean up if tar fails
+    sudo rm -rf "$export_dir" 2>/dev/null || rm -rf "$export_dir"
+    die "Failed to compress blockchain data"
+  }
+  
+  # Fix ownership of the compressed file so user can access it
+  sudo chown "$USER:$USER" "$blockchain_export_dir/blockchain-data.tar.gz" 2>/dev/null || true
+  
+  # Clean up temporary extraction (use sudo because container files are owned by root)
+  sudo rm -rf "$temp_blockchain" 2>/dev/null || rm -rf "$temp_blockchain"
+  
+  local blockchain_size
+  blockchain_size=$(du -h "$blockchain_export_dir/blockchain-data.tar.gz" | cut -f1)
+  echo "    ✓ Blockchain compressed ($blockchain_size)"
+  
+  echo ""
+  echo "[4/6] Splitting blockchain for GitHub (1.9GB parts)..."
+  cd "$blockchain_export_dir"
+  split -b 1900M -d -a 2 "blockchain-data.tar.gz" "blockchain.tar.gz.part"
+  
+  # Renumber parts to start from 01 instead of 00
+  local part_count=0
+  for part in blockchain.tar.gz.part*; do
+    if [[ -f "$part" ]]; then
+      part_count=$((part_count + 1))
+    fi
+  done
+  
+  if [[ $part_count -gt 0 ]]; then
+    for ((i=part_count-1; i>=0; i--)); do
+      local old_num=$(printf "%02d" $i)
+      local new_num=$(printf "%02d" $((i+1)))
+      mv "blockchain.tar.gz.part${old_num}" "blockchain.tar.gz.part${new_num}"
+    done
+  fi
+  
+  rm -f "blockchain-data.tar.gz"  # Remove unsplit version
+  
+  echo "    ✓ Split into $part_count parts"
+  
+  echo ""
+  echo "[5/6] Creating manifest..."
+  
+  # Create manifest
+  cat > MANIFEST.txt << EOF
+Blockchain Data Export (SANITIZED)
+===================================
+
+Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Export Timestamp: $export_timestamp
+Source: $CONTAINER_NAME (Container)
+Block Height: $blocks
+
+Security:
+=========
+
+✓ Peer databases removed (peers.dat, anchors.dat, banlist.dat)
+✓ Tor hidden service keys removed
+✓ Debug logs removed
+✓ Wallet files removed (if any existed)
+✓ Mempool data removed
+✓ Lock files and PIDs removed
+
+This blockchain data is SAFE for public distribution.
+Sensitive/identifying information has been stripped.
+
+Split Information:
+==================
+
+This blockchain data has been split into $part_count parts for GitHub compatibility.
+Each part is approximately 1.9GB (under GitHub's 2GB limit).
+
+To Reassemble:
+==============
+
+cat blockchain.tar.gz.part* > blockchain.tar.gz
+
+Or let garbageman-vmm.sh handle it automatically via "Import from file"
+
+Files in this export:
+=====================
+
+$(ls -1h blockchain.tar.gz.part* | while read f; do
+    size=$(du -h "$f" | cut -f1)
+    echo "  $f ($size)"
+done)
+
+Total Size: $(du -ch blockchain.tar.gz.part* | tail -n1 | cut -f1)
+EOF
+  
+  echo "    ✓ Blockchain export complete (sanitized)"
+  
+  # Step 3: Export container image
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 3: Export Container Image"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Use temporary directory for image export, then package it
+  local temp_export_dir="$export_dir/.tmp-image"
+  mkdir -p "$temp_export_dir" || die "Failed to create temporary export directory"
+  
+  echo "[1/3] Exporting container image..."
+  if ! container_cmd save -o "$temp_export_dir/container-image.tar" "$CONTAINER_IMAGE"; then
+    rm -rf "$export_dir"
+    die "Failed to export container image"
+  fi
+  
+  local image_size
+  image_size=$(du -h "$temp_export_dir/container-image.tar" | cut -f1)
+  echo "    ✓ Image exported ($image_size)"
+  
+  echo ""
+  echo "[2/3] Creating README and metadata..."
+  
+  cat > "$temp_export_dir/README.txt" << 'EOF'
+Garbageman Container Image Export (NEW MODULAR FORMAT)
+=======================================================
+
+This archive contains a container image WITHOUT blockchain data.
+The blockchain must be downloaded separately for a complete import.
+
+Contents:
+---------
+- container-image.tar: Docker/Podman image
+- README.txt: This file
+- METADATA.txt: Export information
+
+What's Included:
+----------------
+- Alpine Linux base
+- Bitcoin Garbageman (compiled)
+- Tor for hidden service
+- Configured bitcoind service
+
+What's NOT Included:
+--------------------
+- Blockchain data (included separately as blockchain.tar.gz.part* files)
+- Data volume (created during import)
+
+Blockchain Data:
+----------------
+The blockchain data is included in this export folder as split parts:
+  blockchain.tar.gz.part01, part02, etc.
+
+Import Instructions:
+====================
+
+Method 1 (Recommended): Use garbageman-vmm.sh
+  ./garbageman-vmm.sh → Create Base Container → Import from file
+  
+  The script will automatically:
+  1. Import the container image
+  2. Reassemble and import blockchain data
+  3. Combine them into a complete working container
+
+Method 2 (Manual - Docker):
+  1. Load image: docker load -i container-image.tar
+  2. Create volume: docker volume create garbageman-data
+  3. Reassemble blockchain:
+     cat blockchain.tar.gz.part* > blockchain.tar.gz
+     tar xzf blockchain.tar.gz
+  4. Inject blockchain into volume:
+     docker run --rm -v garbageman-data:/data -v $(pwd):/import:ro \
+       alpine cp -a /import/* /data/
+  5. Create container:
+     docker create --name gm-base --network host \
+       -v garbageman-data:/var/lib/bitcoin \
+       garbageman:latest
+
+Method 2 (Manual - Podman): Same as Docker, replace 'docker' with 'podman'
+
+Notes:
+------
+- Container image size: ~500MB (much smaller than old monolithic format)
+- Blockchain size: ~20GB compressed
+- Total combined: ~21GB (same as before, but now modular)
+- Can update container image without re-downloading blockchain
+- Can share blockchain between VM and container deployments
+EOF
+
+  cat > "$temp_export_dir/METADATA.txt" <<METADATA
+Export Information
+==================
+
+Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Export Timestamp: $export_timestamp
+Format: Modular (container image + blockchain parts)
+
+Container Specifications:
+--------------------------
+Name: $CONTAINER_NAME
+Image: $CONTAINER_IMAGE
+Runtime: $(container_runtime)
+
+Blockchain Information:
+-----------------------
+Height at Export: $blocks
+Format: Split into parts (blockchain.tar.gz.part*)
+
+Security & Privacy:
+-------------------
+✓ Blockchain sanitized before export
+✓ Peer databases removed (peers.dat, anchors.dat, banlist.dat)
+✓ Tor hidden service keys removed (regenerated on import)
+✓ Debug logs removed (may contain IP addresses)
+✓ Wallet files removed (none should exist on pruned node)
+✓ Mempool data removed
+✓ Lock files and PIDs removed
+
+SAFE FOR PUBLIC DISTRIBUTION - No identifying information included.
+
+Companion Files:
+----------------
+This container image pairs with blockchain data:
+  blockchain.tar.gz.part01, part02, etc.
+
+All files are included in this unified export folder.
+METADATA
+  
+  echo "    ✓ README and metadata created"
+  
+  echo ""
+  echo "[3/3] Creating container image archive..."
+  local image_archive_name="container-image-${export_timestamp}.tar.gz"
+  local image_archive_path="$export_dir/${image_archive_name}"
+  
+  # Archive the temporary directory contents
+  tar -czf "$image_archive_path" -C "$temp_export_dir" . || {
+    rm -rf "$export_dir"
+    die "Failed to create archive"
+  }
+  
+  # Remove temporary directory
+  rm -rf "$temp_export_dir"
+  
+  local archive_size
+  archive_size=$(du -h "$image_archive_path" | cut -f1)
+  echo "    ✓ Container image archived ($archive_size)"
+  
+  # Generate combined checksums for all files
+  echo "    Generating checksums..."
+  (cd "$export_dir" && sha256sum blockchain.tar.gz.part* "${image_archive_name}" > SHA256SUMS)
+  
+  # Add reassembled blockchain checksum
+  echo "" >> "$export_dir/SHA256SUMS"
+  echo "# Reassembled blockchain checksum:" >> "$export_dir/SHA256SUMS"
+  (cd "$export_dir" && cat blockchain.tar.gz.part* | sha256sum | sed 's/-/blockchain.tar.gz/' >> SHA256SUMS)
+  
+  echo "    ✓ Checksums created"
+  
+  # Calculate totals
+  local total_size
+  total_size=$(du -csh "$export_dir"/* 2>/dev/null | tail -n1 | cut -f1)
+  
+  # Success!
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                    Modular Export Complete!                                    ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "📦 Unified Export Folder:"
+  echo ""
+  echo "  Location: $export_dir/"
+  echo "  Total Size: $total_size"
+  echo ""
+  echo "  Contents:"
+  echo "    • blockchain.tar.gz.part* - Blockchain data split into GitHub-compatible parts"
+  echo "    • ${image_archive_name} - Container image archive"
+  echo "    • SHA256SUMS - Combined checksums for all files"
+  echo "    • MANIFEST.txt - Export information"
+  echo ""
+  echo "  Blockchain Components:"
+  echo "    • Parts: $(ls -1 "$export_dir"/blockchain.tar.gz.part* 2>/dev/null | wc -l) files"
+  echo ""
+  echo "🔗 Timestamp: $export_timestamp"
+  echo ""
+  echo "📋 Benefits of Unified Export:"
+  echo "   • All components in one folder - easy to manage and transfer"
+  echo "   • Smaller container image (~500MB vs ~22GB monolithic)"
+  echo "   • Blockchain can be reused across exports"
+  echo "   • Blockchain split for GitHub 2GB limit compatibility"
+  echo ""
+  echo "📤 To Import:"
+  echo "   Use 'Import from file' in garbageman-vmm.sh"
+  echo "   The script will automatically combine both components"
+  echo ""
+  
+  pause "Export complete!\n\nUnified export folder: $export_dir/"
+}
+
+# import_base_container: Import container from export archive (supports both formats)
+# Purpose: Restore container image and blockchain data from portable archive
+# Supported inputs:
+#   - NEW unified export folder: gm-export-YYYYMMDD-HHMMSS/
+#     • May contain container and/or VM image archives plus blockchain parts
+#     • This function uses the container image; if only a VM image is found, user is guided to the VM import
+#   - OLD monolithic archive:   gm-container-export-YYYYMMDD-HHMMSS.tar.gz (image + blockchain)
+#   - OLD modular container:    gm-container-image-YYYYMMDD-HHMMSS.tar.gz (image only)
+# Process (new unified folder):
+#   1. Let user configure defaults (reserves, container sizes, clearnet toggle)
+#   2. Scan ~/Downloads for gm-export-* folders
+#   3. Let user select which export to import
+#   4. Prefer container image; if missing but VM image present, show helpful guidance
+#   5. Verify checksums when available (SHA256SUMS or per-file .sha256)
+#   6. Load container image (docker/podman load)
+#   7. Create volume and inject blockchain if parts are present
+#   8. Create container with proper configuration
+# Notes:
+#   - Folder detection is flexible: either image type triggers listing in menu
+#   - Cross-guidance helps users pick the correct import path (container vs VM)
+# Recommendation: Use "Import from GitHub" for complete automated download/verify/import
+import_base_container(){
+  # Let user configure defaults for resource allocation
+  if ! configure_defaults_container; then
+    pause "Cancelled."
+    return
+  fi
+  
+  echo "Scanning ~/Downloads for container exports..."
+  local archives=()
+  local export_items=()
+  
+  # Look for NEW unified export folders (gm-export-*)
+  while IFS= read -r -d '' folder; do
+    # Check if it contains a container image archive OR VM image archive
+    # This allows importing from folders that have either or both image types
+    if ls "$folder"/container-image-*.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/gm-container-image-*.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/vm-image-*.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/gm-vm-image-*.tar.gz >/dev/null 2>&1; then
+      export_items+=("folder:$folder")
+    fi
+  done < <(find "$HOME/Downloads" -maxdepth 1 -type d -name "gm-export-*" -print0 2>/dev/null | sort -z)
+  
+  # Look for OLD format archives (gm-container-export, gm-container-image .tar.gz files)
+  while IFS= read -r -d '' archive; do
+    export_items+=("file:$archive")
+  done < <(find "$HOME/Downloads" -maxdepth 1 -type f \( -name "gm-container-export-*.tar.gz" -o -name "gm-container-image-*.tar.gz" \) -print0 2>/dev/null | sort -z)
+  
+  if [[ ${#export_items[@]} -eq 0 ]]; then
+    pause "No container exports found in ~/Downloads/\n\nLooking for:\n  gm-export-* folders with container or VM images\n  gm-container-export-*.tar.gz (old format)\n  gm-container-image-*.tar.gz (old modular format)"
+    return
+  fi
+  
+  # Build menu
+  local menu_items=()
+  for i in "${!export_items[@]}"; do
+    local item="${export_items[$i]}"
+    local type="${item%%:*}"
+    local path="${item#*:}"
+    local basename=$(basename "$path")
+    local display
+    
+    if [[ "$type" == "folder" ]]; then
+      local folder_size=$(du -sh "$path" 2>/dev/null | cut -f1)
+      
+      # Check if blockchain data is present
+      local blockchain_status="blockchain included"
+      if ! ls "$path"/blockchain.tar.gz.part* >/dev/null 2>&1 && \
+         ! ls "$path"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+        blockchain_status="image only, no blockchain"
+      fi
+      
+      display="$basename/ ($folder_size) [${blockchain_status}]"
+    else
+      local file_size=$(du -h "$path" | cut -f1)
+      
+      # Old archives likely have blockchain included (monolithic format)
+      local blockchain_status="blockchain included"
+      if [[ "$basename" =~ container-image ]]; then
+        blockchain_status="image only, no blockchain"
+      fi
+      
+      display="$basename ($file_size) [${blockchain_status}]"
+    fi
+    
+    menu_items+=("$i" "$display")
+  done
+  
+  local selection
+  selection=$(whiptail --title "Select Container Export" --menu \
+    "Select export to import:" 20 78 10 \
+    "${menu_items[@]}" \
+    3>&1 1>&2 2>&3) || return
+  
+  local selected_item="${export_items[$selection]}"
+  local item_type="${selected_item%%:*}"
+  local item_path="${selected_item#*:}"
+  
+  echo "Importing: $(basename "$item_path")"
+  echo ""
+  
+  # Handle different formats
+  local temp_dir
+  temp_dir=$(mktemp -d -t gm-container-import-XXXXXX)
+  trap "rm -rf '$temp_dir'" RETURN EXIT INT TERM
+  
+  local extract_dir
+  local blockchain_dir
+  
+  if [[ "$item_type" == "folder" ]]; then
+    # NEW unified format: folder with image archive and blockchain parts at root
+    echo "[1/5] Using unified export folder..."
+    extract_dir="$item_path"
+    
+    # Find the image archive within the folder (new or old naming)
+    local image_archive=$(ls "$extract_dir"/container-image-*.tar.gz 2>/dev/null | head -n1)
+    if [[ -z "$image_archive" ]]; then
+      # Try old naming
+      image_archive=$(ls "$extract_dir"/gm-container-image-*.tar.gz 2>/dev/null | head -n1)
+    fi
+    
+    if [[ -z "$image_archive" ]]; then
+      # Check if folder has VM image instead
+      if ls "$extract_dir"/vm-image-*.tar.gz >/dev/null 2>&1 || ls "$extract_dir"/gm-vm-image-*.tar.gz >/dev/null 2>&1; then
+        pause "❌ This folder only contains a VM image.\n\nTo import as a VM:\n1. Cancel and return to main menu\n2. Choose 'Create Base VM'\n3. Select 'Import from file'\n4. Choose this same folder\n\nOr download/export a container image for this release."
+        return
+      else
+        die "No container image archive found in export folder"
+      fi
+    fi
+    
+    echo "    Extracting container image archive..."
+    tar -xzf "$image_archive" -C "$temp_dir" || die "Failed to extract image archive"
+    
+    # Blockchain parts are at root level in new format
+    blockchain_dir="$extract_dir"
+    
+  else
+    # OLD format: extract .tar.gz archive
+    echo "[1/5] Extracting archive..."
+    if ! tar -xzf "$item_path" -C "$temp_dir"; then
+      die "Failed to extract archive"
+    fi
+    
+    # Find extracted directory (old or new format naming)
+    extract_dir=$(find "$temp_dir" -maxdepth 1 -type d \( -name "gm-container-export-*" -o -name "gm-container-image-*" \) | head -n1)
+    
+    if [[ -z "$extract_dir" ]]; then
+      die "Could not find extracted directory in archive"
+    fi
+  fi
+  
+  # Find container image tar (handle both formats)
+  local image_tar=""
+  if [[ -f "$temp_dir/container-image.tar" ]]; then
+    image_tar="$temp_dir/container-image.tar"  # Extracted from archive
+  elif [[ -f "$extract_dir/container-image.tar" ]]; then
+    image_tar="$extract_dir/container-image.tar"  # Old format in extracted dir
+  elif [[ -f "$extract_dir/garbageman-image.tar" ]]; then
+    image_tar="$extract_dir/garbageman-image.tar"  # Alternative name
+  fi
+  
+  if [[ -z "$image_tar" ]]; then
+    die "Container image tar not found in export"
+  fi
+  
+  # Load container image
+  echo ""
+  echo "[2/5] Loading container image..."
+  if ! container_cmd load -i "$image_tar"; then
+    die "Failed to load container image"
+  fi
+  echo "    ✓ Image loaded"
+  
+  # Create data volume and import data
+  echo ""
+  echo "[3/5] Importing blockchain data..."
+  container_cmd volume create garbageman-data >/dev/null 2>&1 || true
+  
+  # Check for blockchain data in different locations
+  local blockchain_imported=false
+  
+  # NEW format: blockchain parts at root level (no subfolder)
+  if [[ -n "$blockchain_dir" && -d "$blockchain_dir" ]]; then
+    echo "  Found blockchain data in unified export folder..."
+    
+    # Check for new naming (blockchain.tar.gz.part*)
+    if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
+      echo "  Reassembling blockchain parts..."
+      cat "$blockchain_dir"/blockchain.tar.gz.part* > "$temp_dir/blockchain.tar.gz" || die "Failed to reassemble blockchain"
+      
+      # Verify checksum if available (check SHA256SUMS file)
+      if [[ -f "$blockchain_dir/SHA256SUMS" ]]; then
+        echo "  Verifying blockchain checksum..."
+        local expected_sum=$(grep "blockchain.tar.gz$" "$blockchain_dir/SHA256SUMS" | awk '{print $1}')
+        local actual_sum=$(sha256sum "$temp_dir/blockchain.tar.gz" | awk '{print $1}')
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+          die "Blockchain checksum mismatch! Export may be corrupted."
+        fi
+        echo "    ✓ Checksum verified"
+      fi
+      
+      # Import blockchain
+      echo "  Importing blockchain to volume..."
+      if ! container_cmd run --rm \
+        -v garbageman-data:/data \
+        -v "$temp_dir:/backup:ro" \
+        alpine:3.18 \
+        tar xzf /backup/blockchain.tar.gz -C /data >/dev/null 2>&1; then
+        die "Failed to import blockchain data"
+      fi
+      blockchain_imported=true
+      echo "    ✓ Blockchain data imported"
+      
+    # OLD format with gm- prefix
+    elif ls "$blockchain_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+      echo "  Reassembling blockchain parts (old naming)..."
+      cat "$blockchain_dir"/gm-blockchain.tar.gz.part* > "$temp_dir/gm-blockchain.tar.gz" || die "Failed to reassemble blockchain"
+      
+      # Verify checksum if available
+      if [[ -f "$blockchain_dir/gm-blockchain.tar.gz.sha256" ]]; then
+        echo "  Verifying blockchain checksum..."
+        local expected_sum=$(grep "gm-blockchain.tar.gz$" "$blockchain_dir/gm-blockchain.tar.gz.sha256" | awk '{print $1}')
+        local actual_sum=$(sha256sum "$temp_dir/gm-blockchain.tar.gz" | awk '{print $1}')
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+          die "Blockchain checksum mismatch! Export may be corrupted."
+        fi
+        echo "    ✓ Checksum verified"
+      fi
+      
+      # Import blockchain
+      echo "  Importing blockchain to volume..."
+      if ! container_cmd run --rm \
+        -v garbageman-data:/data \
+        -v "$temp_dir:/backup:ro" \
+        alpine:3.18 \
+        tar xzf /backup/gm-blockchain.tar.gz -C /data >/dev/null 2>&1; then
+        die "Failed to import blockchain data"
+      fi
+      blockchain_imported=true
+      echo "    ✓ Blockchain data imported"
+    fi
+    
+  # OLD format: blockchain-data.tar.gz in extracted dir
+  elif [[ -f "$extract_dir/blockchain-data.tar.gz" ]]; then
+    echo "  Found blockchain data in archive (old monolithic format)..."
+    if ! container_cmd run --rm \
+      -v garbageman-data:/data \
+      -v "$extract_dir:/backup:ro" \
+      alpine:3.18 \
+      tar xzf /backup/blockchain-data.tar.gz -C /data >/dev/null 2>&1; then
+      die "Failed to import blockchain data"
+    fi
+    blockchain_imported=true
+    echo "    ✓ Blockchain data imported"
+  fi
+  
+  if [[ "$blockchain_imported" == "false" ]]; then
+    echo "  ⚠ No blockchain data found in export"
+    echo "  ⚠ You'll need to:"
+    echo "    1. Download blockchain separately from GitHub"
+    echo "    2. Use 'Import from GitHub' option instead, OR"
+    echo "    3. Manually import blockchain data into the volume"
+    pause "\nThis export contains only the container image, not blockchain data.\n\nUse 'Import from GitHub' for complete import, or manually import blockchain."
+    return
+  fi
+  
+  # Create container
+  echo ""
+  echo "[4/5] Creating container..."
+  
+  # Note about configuration
+  echo "    Configuring for CLEARNET_OK=${CLEARNET_OK}"
+  
+  if ! container_cmd create \
+    --name "$CONTAINER_NAME" \
+    --cpus="${VM_VCPUS}.0" \
+    --memory="${VM_RAM_MB}m" \
+    -v garbageman-data:/var/lib/bitcoin \
+    --restart unless-stopped \
+    "$CONTAINER_IMAGE"; then
+    die "Failed to create container"
+  fi
+  echo "    ✓ Container created"
+  
+  # Inject bitcoin.conf into the volume based on CLEARNET_OK setting
+  echo ""
+  echo "[5/5] Configuring bitcoin.conf based on clearnet setting..."
+  
+  local btc_conf_content
+  if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+    echo "    Injecting config for: Tor + clearnet (faster sync)"
+    btc_conf_content="server=1
+prune=750
+dbcache=450
+maxconnections=25
+listen=1
+bind=0.0.0.0
+onlynet=onion
+onlynet=ipv4
+listenonion=1
+discover=1
+dnsseed=1
+proxy=127.0.0.1:9050
+torcontrol=127.0.0.1:9051
+[main]"
+  else
+    echo "    Injecting config for: Tor-only (maximum privacy)"
+    btc_conf_content="server=1
+prune=750
+dbcache=450
+maxconnections=25
+onlynet=onion
+proxy=127.0.0.1:9050
+listen=1
+bind=0.0.0.0
+listenonion=1
+discover=0
+dnsseed=0
+torcontrol=127.0.0.1:9051
+[main]"
+  fi
+  
+  # Create temporary file with bitcoin.conf
+  local temp_conf=$(mktemp)
+  echo "$btc_conf_content" > "$temp_conf"
+  
+  # Inject bitcoin.conf into the volume using a temporary container
+  # Place it at /var/lib/bitcoin/bitcoin.conf (in the volume)
+  if container_cmd run --rm \
+    -v garbageman-data:/data \
+    -v "$temp_conf:/bitcoin.conf:ro" \
+    alpine:3.18 \
+    sh -c 'cp /bitcoin.conf /data/bitcoin.conf && chmod 644 /data/bitcoin.conf' 2>/dev/null; then
+    echo "    ✓ bitcoin.conf injected into volume"
+    
+    # Update the container to use the config from the volume
+    container_cmd rm "$CONTAINER_NAME" >/dev/null 2>&1
+    if ! container_cmd create \
+      --name "$CONTAINER_NAME" \
+      --cpus="${VM_VCPUS}.0" \
+      --memory="${VM_RAM_MB}m" \
+      -v garbageman-data:/var/lib/bitcoin \
+      --restart unless-stopped \
+      "$CONTAINER_IMAGE" \
+      bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin; then
+      # Fallback: recreate without custom command
+      echo "    ⚠️  Failed to override config, using default from image"
+      container_cmd create \
+        --name "$CONTAINER_NAME" \
+        --cpus="${VM_VCPUS}.0" \
+        --memory="${VM_RAM_MB}m" \
+        -v garbageman-data:/var/lib/bitcoin \
+        --restart unless-stopped \
+        "$CONTAINER_IMAGE" >/dev/null 2>&1
+    else
+      echo "    ✓ Container configured to use injected bitcoin.conf"
+    fi
+  else
+    echo "    ⚠️  Warning: Failed to inject config, using default from image"
+  fi
+  
+  rm -f "$temp_conf"
+  
+  echo "    ✓ Container configuration complete"
+  echo ""
+  echo "✅ Import complete!"
+  echo ""
+  pause "Container '$CONTAINER_NAME' imported successfully!\n\nUse 'Monitor Base Container Sync' to check status."
+}
+
+# import_from_github_container: Import container from GitHub release (NEW MODULAR FORMAT)
+# Purpose: Download and import pre-built container using modular architecture
+# Modular Design:
+#   - Downloads blockchain data separately from images
+#   - Downloads BOTH images (container + VM) for flexibility/switching later
+#   - Verifies checksums (unified SHA256SUMS when available)
+#   - Reassembles blockchain from split parts
+#   - Uses container image for import; keeps VM image for later use
+# Flow:
+#   1. Let user configure defaults (reserves, container sizes, clearnet toggle)
+#   2. Fetch available releases from GitHub API
+#   3. Let user select a release tag
+#   4. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
+#   5. Download container image (container-image-*.tar.gz or gm-container-image-*.tar.gz)
+#   6. Download VM image (vm-image-*.tar.gz or gm-vm-image-*.tar.gz)
+#   7. Verify checksums for parts and images (prefer SHA256SUMS)
+#   8. Reassemble blockchain from parts
+#   9. Load container image with docker/podman load
+#  10. Create data volume (garbageman-data)
+#  11. Extract and inject blockchain data into volume
+#  12. Create base container with proper configuration
+#  13. Cleanup temporary files (keep original downloads)
+# Prerequisites: docker or podman, curl or wget, jq
+# Download Size: ~21GB (blockchain) + ~0.5GB (container) + ~1GB (VM) ≈ ~22.5GB total
+# Benefits over old format:
+#   - Blockchain is separate (can be shared between VM and container)
+#   - Much smaller per-image downloads (~0.5GB container, ~1GB VM)
+#   - Can switch between VM and container without re-downloading blockchain
+#   - Downloaded files preserved for USB transfer to other computers
+# Side effects: Downloads to ~/Downloads/gm-export-*, imports complete container with volume
+import_from_github_container(){
+  local repo="paulscode/garbageman-vmm"
+  local api_url="https://api.github.com/repos/$repo/releases"
+  
+  # Cleanup function for temporary files (called on both success and failure)
+  cleanup_container_import_temps(){
+    local dir="$1"
+    [[ -z "$dir" || ! -d "$dir" ]] && return
+    
+    # Remove temporary files (keep original downloads for USB transfer)
+    rm -f "$dir"/blockchain.tar.gz "$dir"/gm-blockchain.tar.gz 2>/dev/null
+    rm -rf "$dir/blockchain-data" "$dir/container-image" 2>/dev/null
+  }
+  
+  # Let user configure defaults for resource allocation
+  if ! configure_defaults_container; then
+    pause "Cancelled."
+    return
+  fi
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║          Import Base Container from GitHub (Modular Download)                  ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "This import downloads blockchain data and BOTH images (container + VM) separately."
+  echo "We'll import the container now and keep the VM image so you can switch later."
+  echo "Benefits: Smaller per-image downloads; switch without re-downloading blockchain."
+  echo ""
+  
+  # Detect container runtime
+  local runtime=$(container_runtime)
+  if [[ -z "$runtime" ]]; then
+    pause "❌ No container runtime found.\n\nThis should not happen - ensure_tools should have installed Docker.\nTry restarting the script or install docker/podman manually."
+    return
+  fi
+  
+  # Check for required tools
+  if ! command -v jq >/dev/null 2>&1; then
+    pause "❌ Required tool 'jq' not found.\n\nInstall with: sudo apt install jq"
+    return
+  fi
+  
+  local download_tool=""
+  if command -v curl >/dev/null 2>&1; then
+    download_tool="curl"
+  elif command -v wget >/dev/null 2>&1; then
+    download_tool="wget"
+  else
+    pause "❌ Neither 'curl' nor 'wget' found.\n\nInstall with: sudo apt install curl"
+    return
+  fi
+  
+  echo "Fetching available releases from GitHub..."
+  local releases_json
+  if [[ "$download_tool" == "curl" ]]; then
+    releases_json=$(curl -s "$api_url" 2>/dev/null)
+  else
+    releases_json=$(wget -q -O- "$api_url" 2>/dev/null)
+  fi
+  
+  if [[ -z "$releases_json" ]] || ! echo "$releases_json" | jq -e . >/dev/null 2>&1; then
+    pause "❌ Failed to fetch releases from GitHub.\n\nCheck your internet connection."
+    return
+  fi
+  
+  # Parse releases and build menu
+  local tags=()
+  local tag_names=()
+  local menu_items=()
+  
+  while IFS= read -r tag; do
+    [[ -z "$tag" ]] && continue
+    tags+=("$tag")
+    local tag_name=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$tag\") | .name // .tag_name")
+    local published=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$tag\") | .published_at" | cut -d'T' -f1)
+    tag_names+=("$tag_name")
+    menu_items+=("$tag" "$tag_name ($published)")
+  done < <(echo "$releases_json" | jq -r '.[].tag_name')
+  
+  if [[ ${#tags[@]} -eq 0 ]]; then
+    pause "No releases found."
+    return
+  fi
+  
+  echo "Found ${#tags[@]} release(s)"
+  echo ""
+  
+  # Let user select release
+  local selected_tag
+  selected_tag=$(whiptail --title "Select GitHub Release" \
+    --menu "Choose a release to download and import:" 20 78 10 \
+    "${menu_items[@]}" \
+    3>&1 1>&2 2>&3) || return
+  
+  echo "Selected: $selected_tag"
+  echo ""
+  
+  # Get assets for selected release
+  local release_assets
+  release_assets=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$selected_tag\") | .assets")
+  
+  # Find blockchain parts, container image, VM image, and checksums (support both old and new naming)
+  local blockchain_part_urls=()
+  local blockchain_part_names=()
+  local blockchain_checksum_url=""
+  local container_image_url=""
+  local container_image_name=""
+  local container_checksum_url=""
+  local vm_image_url=""
+  local vm_image_name=""
+  local vm_checksum_url=""
+  local sha256sums_url=""
+  
+  while IFS='|' read -r name url; do
+    [[ -z "$name" ]] && continue
+    # NEW naming (blockchain.tar.gz.part*)
+    if [[ "$name" =~ ^blockchain\.tar\.gz\.part[0-9]+$ ]]; then
+      blockchain_part_names+=("$name")
+      blockchain_part_urls+=("$url")
+    # OLD naming (gm-blockchain.tar.gz.part*)
+    elif [[ "$name" =~ ^gm-blockchain\.tar\.gz\.part[0-9]+$ ]]; then
+      blockchain_part_names+=("$name")
+      blockchain_part_urls+=("$url")
+    # NEW unified checksum file
+    elif [[ "$name" == "SHA256SUMS" ]]; then
+      sha256sums_url="$url"
+    # OLD blockchain checksum
+    elif [[ "$name" == "gm-blockchain.tar.gz.sha256" ]]; then
+      blockchain_checksum_url="$url"
+    # NEW container image naming (container-image-*)
+    elif [[ "$name" =~ ^container-image-.*\.tar\.gz$ ]]; then
+      container_image_name="$name"
+      container_image_url="$url"
+    # OLD container image naming (gm-container-image-*)
+    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz$ ]]; then
+      container_image_name="$name"
+      container_image_url="$url"
+    # OLD container image checksum
+    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image-.*\.tar\.gz\.sha256$ ]]; then
+      container_checksum_url="$url"
+    # NEW VM image naming (vm-image-*)
+    elif [[ "$name" =~ ^vm-image-.*\.tar\.gz$ ]]; then
+      vm_image_name="$name"
+      vm_image_url="$url"
+    # OLD VM image naming (gm-vm-image-*)
+    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz$ ]]; then
+      vm_image_name="$name"
+      vm_image_url="$url"
+    # OLD VM image checksum
+    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image-.*\.tar\.gz\.sha256$ ]]; then
+      vm_checksum_url="$url"
+    fi
+  done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
+  
+  # Validate required files are present
+  if [[ ${#blockchain_part_urls[@]} -eq 0 ]]; then
+    pause "❌ No blockchain parts found in release $selected_tag"
+    return
+  fi
+  
+  if [[ -z "$container_image_url" ]]; then
+    pause "❌ No container image found in release $selected_tag"
+    return
+  fi
+  
+  # Warn if VM image not found (optional but recommended)
+  if [[ -z "$vm_image_url" ]]; then
+    echo "⚠ Warning: VM image not found in this release (older format)"
+    echo "  You can still use the container, but won't be able to switch to VM later."
+    echo ""
+  fi
+  
+  # Calculate approximate download sizes
+  local blockchain_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 )) GB"  # parts are ~1.9GB each
+  local container_size="~500 MB"
+  local vm_size="~1 GB"
+  local total_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 + 2 )) GB"  # +2GB for both images
+  
+  echo "Download plan:"
+  echo "  • Blockchain data: ${#blockchain_part_urls[@]} parts ($blockchain_size)"
+  echo "  • Container image: $container_image_name ($container_size)"
+  if [[ -n "$vm_image_url" ]]; then
+    echo "  • VM image: $vm_image_name ($vm_size)"
+    echo "  Total: $total_size"
+  fi
+  echo ""
+  
+  local download_message="This will download approximately $total_size of data.\n\nBlockchain parts: ${#blockchain_part_urls[@]}\nContainer image: $container_image_name"
+  if [[ -n "$vm_image_url" ]]; then
+    download_message+="\nVM image: $vm_image_name"
+  fi
+  download_message+="\nRelease: $selected_tag\n\nBoth images will be downloaded for flexibility.\nYou can switch between VM and container\nwithout re-downloading the blockchain.\n\nContinue?"
+  
+  if ! whiptail --title "Confirm Download" \
+    --yesno "$download_message" \
+    18 75; then
+    echo "Download cancelled."
+    return
+  fi
+  
+  # Create persistent download directory in ~/Downloads with unified export structure
+  local download_timestamp=$(date +%Y%m%d-%H%M%S)
+  local download_dir="$HOME/Downloads/gm-export-${download_timestamp}"
+  mkdir -p "$download_dir"
+  
+  # Set trap to cleanup temporary files on exit (success or failure)
+  trap "cleanup_container_import_temps '$download_dir'" RETURN EXIT INT TERM
+  
+  echo ""
+  echo "Downloading to: $download_dir"
+  echo "(Files will be kept for USB transfer or future imports)"
+  echo ""
+  
+  # Step 1: Download blockchain parts
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 1: Downloading Blockchain Data (${#blockchain_part_urls[@]} parts)"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  for i in "${!blockchain_part_urls[@]}"; do
+    local part_name="${blockchain_part_names[$i]}"
+    local part_url="${blockchain_part_urls[$i]}"
+    local part_num=$((i + 1))
+    
+    echo "[Part $part_num/${#blockchain_part_urls[@]}] Downloading $part_name..."
+    
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -L --progress-bar -o "$download_dir/$part_name" "$part_url" || {
+        pause "❌ Failed to download $part_name"
+        return
+      }
+    else
+      wget --show-progress -O "$download_dir/$part_name" "$part_url" || {
+        pause "❌ Failed to download $part_name"
+        return
+      }
+    fi
+  done
+  
+  # Download checksums (prefer unified SHA256SUMS, fall back to old format)
+  if [[ -n "$sha256sums_url" ]]; then
+    echo ""
+    echo "Downloading unified checksum file (SHA256SUMS)..."
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -sL -o "$download_dir/SHA256SUMS" "$sha256sums_url"
+    else
+      wget -q -O "$download_dir/SHA256SUMS" "$sha256sums_url"
+    fi
+  elif [[ -n "$blockchain_checksum_url" ]]; then
+    echo ""
+    echo "Downloading blockchain checksum (old format)..."
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -sL -o "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
+    else
+      wget -q -O "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
+    fi
+  fi
+  
+  # Step 2: Download container image
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 2: Downloading Container Image"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  echo "Downloading $container_image_name..."
+  
+  if [[ "$download_tool" == "curl" ]]; then
+    curl -L --progress-bar -o "$download_dir/$container_image_name" "$container_image_url" || {
+      pause "❌ Failed to download container image"
+      return
+    }
+  else
+    wget --show-progress -O "$download_dir/$container_image_name" "$container_image_url" || {
+      pause "❌ Failed to download container image"
+      return
+    }
+  fi
+  
+  # Download container checksum (if separate file exists in old format)
+  if [[ -z "$sha256sums_url" ]] && [[ -n "$container_checksum_url" ]]; then
+    echo ""
+    echo "Downloading container image checksum (old format)..."
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -sL -o "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
+    else
+      wget -q -O "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
+    fi
+  fi
+  
+  # Download VM image (if available)
+  if [[ -n "$vm_image_url" ]]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════════════════"
+    echo "Step 2b: Downloading VM Image"
+    echo "═══════════════════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "Downloading $vm_image_name..."
+    
+    if [[ "$download_tool" == "curl" ]]; then
+      curl -L --progress-bar -o "$download_dir/$vm_image_name" "$vm_image_url" || {
+        echo "⚠ Failed to download VM image (optional, continuing...)"
+      }
+    else
+      wget --show-progress -O "$download_dir/$vm_image_name" "$vm_image_url" || {
+        echo "⚠ Failed to download VM image (optional, continuing...)"
+      }
+    fi
+    
+    # Download VM checksum (if separate file exists in old format)
+    if [[ -z "$sha256sums_url" ]] && [[ -n "$vm_checksum_url" ]]; then
+      echo ""
+      echo "Downloading VM image checksum (old format)..."
+      if [[ "$download_tool" == "curl" ]]; then
+        curl -sL -o "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
+      else
+        wget -q -O "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
+      fi
+    fi
+  fi
+  
+  # Step 3: Verify blockchain parts
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 3: Verifying Downloads"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Detect checksum format and verify
+  if [[ -f "$download_dir/SHA256SUMS" ]]; then
+    echo "Verifying blockchain parts (unified checksum)..."
+    cd "$download_dir"
+    
+    local verify_failed=false
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue  # Skip comments
+      [[ -z "$line" ]] && continue     # Skip empty lines
+      [[ ! "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip non-part lines
+      
+      if ! echo "$line" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
+        verify_failed=true
+      fi
+    done < "SHA256SUMS"
+    
+    if [[ "$verify_failed" == "true" ]]; then
+      cd - >/dev/null
+      pause "❌ One or more blockchain parts failed checksum verification!"
+      return
+    fi
+    
+    echo "    ✓ All blockchain parts verified"
+    
+    # Verify container image from same SHA256SUMS file
+    echo ""
+    echo "Verifying container image (unified checksum)..."
+    if grep -q "$(basename "$container_image_name")" "SHA256SUMS" 2>/dev/null; then
+      if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
+        echo "    ✓ Container image verified"
+      else
+        cd - >/dev/null
+        pause "❌ Container image checksum verification failed!"
+        return
+      fi
+    else
+      echo "    ⚠ Container image not in SHA256SUMS (skipping verification)"
+    fi
+    
+    # Verify VM image from same SHA256SUMS file (if downloaded)
+    if [[ -n "$vm_image_url" ]] && [[ -f "$download_dir/$vm_image_name" ]]; then
+      echo ""
+      echo "Verifying VM image (unified checksum)..."
+      if grep -q "$(basename "$vm_image_name")" "SHA256SUMS" 2>/dev/null; then
+        if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
+          echo "    ✓ VM image verified"
+        else
+          echo "    ⚠ VM image checksum failed (optional, continuing...)"
+        fi
+      else
+        echo "    ⚠ VM image not in SHA256SUMS (skipping verification)"
+      fi
+    fi
+    
+    cd - >/dev/null
+    
+  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
+    echo "Verifying blockchain parts (old format)..."
+    cd "$download_dir"
+    
+    local verify_failed=false
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue  # Skip comments
+      [[ -z "$line" ]] && continue     # Skip empty lines
+      [[ ! "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip non-part lines
+      
+      if ! echo "$line" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
+        verify_failed=true
+      fi
+    done < "gm-blockchain.tar.gz.sha256"
+    
+    if [[ "$verify_failed" == "true" ]]; then
+      cd - >/dev/null
+      pause "❌ One or more blockchain parts failed checksum verification!"
+      return
+    fi
+    
+    echo "    ✓ All blockchain parts verified"
+    cd - >/dev/null
+    
+    # Verify container image (old format - separate file)
+    if [[ -f "$download_dir/${container_image_name}.sha256" ]]; then
+      echo ""
+      echo "Verifying container image (old format)..."
+      cd "$download_dir"
+      
+      if sha256sum -c "${container_image_name}.sha256" --quiet 2>/dev/null; then
+        echo "    ✓ Container image verified"
+      else
+        cd - >/dev/null
+        pause "❌ Container image checksum verification failed!"
+        return
+      fi
+      
+      cd - >/dev/null
+    else
+      echo "    ⚠ No container image checksum file (skipping verification)"
+    fi
+  else
+    echo "    ⚠ No checksum files found (skipping verification)"
+  fi
+  
+  # Step 4: Reassemble blockchain
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 4: Reassembling Blockchain Data"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Detect naming scheme (new: blockchain.tar.gz.part*, old: gm-blockchain.tar.gz.part*)
+  local blockchain_archive=""
+  if ls "$download_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
+    cat "$download_dir"/blockchain.tar.gz.part* > "$download_dir/blockchain.tar.gz"
+    blockchain_archive="blockchain.tar.gz"
+    echo "✓ Blockchain reassembled (new naming)"
+  elif ls "$download_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+    cat "$download_dir"/gm-blockchain.tar.gz.part* > "$download_dir/gm-blockchain.tar.gz"
+    blockchain_archive="gm-blockchain.tar.gz"
+    echo "✓ Blockchain reassembled (old naming)"
+  else
+    pause "❌ No blockchain parts found to reassemble!"
+    return
+  fi
+  
+  # Verify reassembled blockchain if checksum available
+  if [[ -f "$download_dir/SHA256SUMS" ]]; then
+    echo ""
+    echo "Verifying reassembled blockchain..."
+    cd "$download_dir"
+    
+    if grep -q "$blockchain_archive\$" "SHA256SUMS" 2>/dev/null; then
+      if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
+        echo "    ✓ Reassembled blockchain verified"
+      else
+        cd - >/dev/null
+        pause "❌ Reassembled blockchain checksum verification failed!"
+        return
+      fi
+    else
+      echo "    ⚠ No checksum entry for reassembled blockchain"
+    fi
+    
+    cd - >/dev/null
+    
+  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
+    echo ""
+    echo "Verifying reassembled blockchain (old format)..."
+    cd "$download_dir"
+    
+    local reassembled_checksum=""
+    while IFS= read -r line; do
+      [[ "$line" =~ ^# ]] && continue
+      [[ -z "$line" ]] && continue
+      [[ "$line" =~ \.part[0-9][0-9] ]] && continue
+      reassembled_checksum="$line"
+      break
+    done < "gm-blockchain.tar.gz.sha256"
+    
+    if [[ -n "$reassembled_checksum" ]]; then
+      if echo "$reassembled_checksum" | sha256sum -c --quiet 2>/dev/null; then
+        echo "    ✓ Reassembled blockchain verified"
+      else
+        cd - >/dev/null
+        pause "❌ Reassembled blockchain checksum verification failed!"
+        return
+      fi
+    fi
+    
+    cd - >/dev/null
+  fi
+  
+  # Step 5: Extract and import container image
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 5: Importing Container Image"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  local container_extract_dir="$download_dir/container-image"
+  mkdir -p "$container_extract_dir"
+  
+  echo "Extracting container image archive..."
+  tar -xzf "$download_dir/$container_image_name" -C "$container_extract_dir"
+  
+  # Find the container tar file
+  local container_tar=$(find "$container_extract_dir" -name "garbageman-image.tar" | head -n1)
+  if [[ -z "$container_tar" ]]; then
+    pause "❌ No garbageman-image.tar file found in container image archive"
+    return
+  fi
+  
+  echo "Found container image: $(basename "$container_tar")"
+  echo ""
+  
+  # Load container image
+  echo "Loading container image into $runtime..."
+  if [[ "$runtime" == "docker" ]]; then
+    container_cmd load -i "$container_tar" || {
+      pause "❌ Failed to load container image"
+      return
+    }
+  else
+    container_cmd load -i "$container_tar" || {
+      pause "❌ Failed to load container image"
+      return
+    }
+  fi
+  
+  # Get the loaded image name
+  local image_name
+  image_name=$(container_cmd images --filter "reference=garbageman:latest" --format "{{.Repository}}:{{.Tag}}" | head -n1)
+  if [[ -z "$image_name" ]]; then
+    pause "❌ Failed to find loaded container image"
+    return
+  fi
+  
+  echo "    ✓ Container image loaded: $image_name"
+  
+  # Step 6: Create data volume and inject blockchain
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 6: Creating Data Volume and Injecting Blockchain"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  # Create volume
+  echo "Creating data volume: garbageman-data..."
+  if $runtime volume inspect garbageman-data >/dev/null 2>&1; then
+    echo "    ⚠ Volume 'garbageman-data' already exists (removing old volume)"
+    $runtime volume rm garbageman-data || {
+      pause "❌ Failed to remove existing volume"
+      return
+    }
+  fi
+  
+  $runtime volume create garbageman-data || {
+    pause "❌ Failed to create data volume"
+    return
+  }
+  
+  echo "    ✓ Data volume created"
+  echo ""
+  
+  # Extract blockchain
+  echo "Extracting blockchain archive..."
+  local blockchain_extract_dir="$download_dir/blockchain-data"
+  mkdir -p "$blockchain_extract_dir"
+  tar -xzf "$download_dir/$blockchain_archive" -C "$blockchain_extract_dir"
+  
+  # Inject blockchain into volume
+  echo "Injecting blockchain into volume (this may take several minutes)..."
+  container_cmd run --rm \
+    -v garbageman-data:/data \
+    -v "$blockchain_extract_dir:/import:ro" \
+    alpine sh -c "cp -a /import/* /data/" || {
+    pause "❌ Failed to inject blockchain data into volume"
+    return
+  }
+  
+  echo "    ✓ Blockchain injected"
+  
+  # Step 7: Create base container
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 7: Creating Base Container"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  echo "    Configuring for CLEARNET_OK=${CLEARNET_OK}"
+  
+  # First, inject bitcoin.conf into the volume based on CLEARNET_OK
+  local btc_conf_content
+  if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+    echo "    Preparing config for: Tor + clearnet (faster sync)"
+    btc_conf_content="server=1
+prune=750
+dbcache=450
+maxconnections=25
+listen=1
+bind=0.0.0.0
+onlynet=onion
+onlynet=ipv4
+listenonion=1
+discover=1
+dnsseed=1
+proxy=127.0.0.1:9050
+torcontrol=127.0.0.1:9051
+[main]"
+  else
+    echo "    Preparing config for: Tor-only (maximum privacy)"
+    btc_conf_content="server=1
+prune=750
+dbcache=450
+maxconnections=25
+onlynet=onion
+proxy=127.0.0.1:9050
+listen=1
+bind=0.0.0.0
+listenonion=1
+discover=0
+dnsseed=0
+torcontrol=127.0.0.1:9051
+[main]"
+  fi
+  
+  # Create temporary file with bitcoin.conf
+  local temp_conf=$(mktemp)
+  echo "$btc_conf_content" > "$temp_conf"
+  
+  # Inject bitcoin.conf into the volume
+  echo "    Injecting bitcoin.conf into volume..."
+  if container_cmd run --rm \
+    -v garbageman-data:/data \
+    -v "$temp_conf:/bitcoin.conf:ro" \
+    alpine:3.18 \
+    sh -c 'cp /bitcoin.conf /data/bitcoin.conf && chmod 644 /data/bitcoin.conf' 2>/dev/null; then
+    echo "    ✓ bitcoin.conf injected successfully"
+    
+    # Create container with custom command to use the injected config
+    echo ""
+    echo "Creating container '$CONTAINER_NAME' with custom configuration..."
+    container_cmd create \
+      --name "$CONTAINER_NAME" \
+      --network host \
+      -v garbageman-data:/var/lib/bitcoin \
+      --memory="${CONTAINER_RUNTIME_RAM}m" \
+      --cpus="$CONTAINER_RUNTIME_CPUS" \
+      "$image_name" \
+      bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin || {
+      # Fallback: create without custom command
+      echo "    ⚠️  Failed to create with custom config, using default"
+      container_cmd create \
+        --name "$CONTAINER_NAME" \
+        --network host \
+        -v garbageman-data:/var/lib/bitcoin \
+        --memory="${CONTAINER_RUNTIME_RAM}m" \
+        --cpus="$CONTAINER_RUNTIME_CPUS" \
+        "$image_name" || {
+        rm -f "$temp_conf"
+        pause "❌ Failed to create base container"
+        return
+      }
+    }
+    echo "    ✓ Container configured to use custom bitcoin.conf"
+  else
+    echo "    ⚠️  Warning: Failed to inject config, creating with default from image"
+    container_cmd create \
+      --name "$CONTAINER_NAME" \
+      --network host \
+      -v garbageman-data:/var/lib/bitcoin \
+      --memory="${CONTAINER_RUNTIME_RAM}m" \
+      --cpus="$CONTAINER_RUNTIME_CPUS" \
+      "$image_name" || {
+      rm -f "$temp_conf"
+      pause "❌ Failed to create base container"
+      return
+    }
+  fi
+  
+  rm -f "$temp_conf"
+  
+  echo "    ✓ Container created"
+  
+  echo ""
+  echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                Container Import Complete!                                      ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "The base container '$CONTAINER_NAME' has been created with:"
+  echo "  • Container image (Alpine Linux + Garbageman)"
+  echo "  • Complete blockchain data in volume 'garbageman-data'"
+  if [[ -n "$vm_image_url" ]] && [[ -f "$download_dir/$vm_image_name" ]]; then
+    echo "  • VM image (downloaded for later use)"
+  fi
+  echo ""
+  echo "Downloaded files saved to:"
+  echo "  $download_dir"
+  echo ""
+  echo "  ℹ You can copy this folder to USB stick for importing on another computer"
+  echo "  ℹ Use 'Import from File' option and select the folder to import"
+  if [[ -n "$vm_image_url" ]] && [[ -f "$download_dir/$vm_image_name" ]]; then
+    echo "  ℹ Both VM and container images available - switch between them anytime"
+  fi
+  echo "  ℹ Temporary files cleaned up automatically"
+  echo ""
+  echo "Next steps:"
+  echo "  • Start container with 'Monitor Base Container Sync' or 'Manage Base Container'"
+  echo "  • Create clones for additional nodes"
+  echo ""
+  
+  pause "Press Enter to return to main menu..."
+}
+
+
+################################################################################
+# Deployment Mode Detection
+################################################################################
+
+# check_deployment_mode: Detect or prompt for VM vs Container deployment
+# Purpose: Auto-detect based on existing gm-base VM or container
+#          Only prompts user if neither exists yet
+# Side effects: Sets global DEPLOYMENT_MODE variable ("vm" or "container")
+# Detection Logic:
+#   1. If gm-base VM exists → mode = "vm"
+#   2. Else if gm-base container exists → mode = "container"
+#   3. Else prompt user with comparison info
+# Note: Once a base is created, deployment mode is locked to that type
+check_deployment_mode(){
+  # Check if gm-base VM exists
+  if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+    DEPLOYMENT_MODE="vm"
+    return 0
+  fi
+  
+  # Check if gm-base container exists
+  if container_exists "$CONTAINER_NAME" 2>/dev/null; then
+    DEPLOYMENT_MODE="container"
+    return 0
+  fi
+  
+  # Neither exists - prompt user
+  local choice
+  choice=$(whiptail --title "Choose Deployment Type" --menu \
+"Welcome to Garbageman VM Manager!
+
+This tool helps you run Bitcoin Garbageman nodes for resisting
+spam in the Libre Relay network. You can deploy using either:
+
+• Containers (RECOMMENDED) - Lightweight, faster startup
+  - Uses Docker or Podman for container management  
+  - Faster cloning and resource efficiency
+  
+• Virtual Machines (VMs) - Legacy implementation
+  - Uses libvirt/qemu-kvm for VM management
+  - Slower to start, but more stable on some systems
+
+⚠️  NOTE: Garbageman VMM is experimental software.
+
+If you encounter issues with one method:
+  1. Delete the base (via Manage menu)
+  2. Exit and relaunch the script
+  3. Try the other deployment type
+
+Choose your deployment type:" 30 78 2 \
+    "container" "Containers (recommended)" \
+    "vm" "Virtual Machines (legacy)" \
+    3>&1 1>&2 2>&3)
+  
+  if [[ -z "$choice" ]]; then
+    echo "No deployment mode selected. Exiting."
+    exit 0
+  fi
+  
+  DEPLOYMENT_MODE="$choice"
+}
+
+
+################################################################################
 # Main Menu & Entry Point
 ################################################################################
 
-# main_menu: Interactive TUI menu loop
-# Purpose: Primary user interface for all VM management operations
-# Menu Options:
-#   1. Create Base VM - Build and configure initial VM (runs once)
-#   2. Monitor Base VM Sync - Start VM and monitor IBD progress
-#   3. Manage Base VM - Simple start/stop/status/export/delete controls
-#   4. Create Clone VMs - Create additional Tor-only nodes
-#   5. Manage Clone VMs - Start, stop, or delete clone VMs
-#   6. Capacity Suggestions - Show host-aware resource recommendations
-#   7. Configure Defaults - Edit reserves, VM sizes, clearnet option
+# main_menu: Interactive TUI menu loop (adaptive to deployment mode)
+# Purpose: Primary user interface for VM or Container management operations
+# Routes to appropriate implementation based on DEPLOYMENT_MODE
+# Menu Options (available in both VM and Container modes):
+#   1. Create Base - Build and configure initial VM/container (runs once)
+#   2. Monitor Base Sync - Start and monitor IBD progress with live updates
+#   3. Manage Base - Start/stop/status/export/delete/cleanup controls
+#   4. Create Clones - Create additional Tor-only nodes with blockchain data copy
+#   5. Manage Clones - Monitor, start, stop, or delete clones
+#   6. Capacity Suggestions - Show host-aware resource recommendations (CPU/RAM/Disk)
+#   7. Configure Defaults - Edit reserves, runtime sizes, clearnet option
 #   8. Quit - Exit the script
 # Loop: Continues until user selects Quit
 main_menu(){
+  # Route to appropriate menu based on deployment mode
+  if [[ "$DEPLOYMENT_MODE" == "container" ]]; then
+    main_menu_container
+  else
+    main_menu_vm
+  fi
+}
+
+# main_menu_vm: VM-specific menu implementation
+main_menu_vm(){
   while true; do
     detect_host_resources
     local base_exists="No"
     virsh_cmd dominfo "$VM_NAME" >/dev/null 2>&1 && base_exists="Yes"
 
-    local header="Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB
+    local header="Deployment: VMs (libvirt/qemu)
+Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB
 Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB
 Base VM exists: ${base_exists}"
 
@@ -4358,14 +9486,58 @@ Base VM exists: ${base_exists}"
   done
 }
 
+# main_menu_container: Container-specific menu implementation
+main_menu_container(){
+  while true; do
+    detect_host_resources
+    local base_exists="No"
+    container_exists "$CONTAINER_NAME" 2>/dev/null && base_exists="Yes"
+
+    local header="Deployment: Containers ($(container_runtime))
+Host: ${HOST_CORES} cores / ${HOST_RAM_MB} MiB   |   Reserve: ${RESERVE_CORES} cores / ${RESERVE_RAM_MB} MiB
+Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB
+Base Container exists: ${base_exists}"
+
+    local choice
+    choice=$(whiptail --title "Garbageman Container Manager" --menu "$header\n\nChoose an action:" 24 92 10 \
+      1 "Create Base Container (${CONTAINER_NAME})" \
+      2 "Monitor Base Container Sync (${CONTAINER_NAME})" \
+      3 "Manage Base Container (${CONTAINER_NAME})" \
+      4 "Create Clone Containers (${CONTAINER_CLONE_PREFIX}-*)" \
+      5 "Manage Clone Containers (${CONTAINER_CLONE_PREFIX}-*)" \
+      6 "Capacity Suggestions (host-aware)" \
+      7 "Configure Defaults (reserves, runtime, clearnet)" \
+      8 "Quit" \
+      3>&1 1>&2 2>&3) || return
+
+    case "$choice" in
+      1) create_base_container ;;         # Action 1: Build container image, configure services
+      2) monitor_container_sync ;;        # Action 2: Start container, monitor IBD progress
+      3) manage_base_container ;;         # Action 3: Start/stop/status/export/delete controls
+      4) clone_container_menu ;;          # Action 4: Create Tor-only container clones
+      5) container_management_menu ;;     # Action 5: Manage existing container clones
+      6) show_capacity_suggestions ;;     # Action 6: Show host-aware resource calculations
+      7)
+         # Action 7: Configure reserves, container runtime sizes, clearnet toggle
+         if configure_defaults; then
+           pause "Defaults updated. Suggestions and capacity have been recalculated."
+         fi
+         ;;
+      8) return ;;  # Action 8: Exit script
+    esac
+  done
+}
+
 
 ################################################################################
 # Script Entry Point
 ################################################################################
 # Execution starts here:
-#   1. Ensure all required tools are installed (installs if missing)
-#   2. Launch main menu loop (runs until user quits)
+#   1. Detect deployment mode (VM or container) based on existing setup
+#   2. Ensure all required tools are installed (installs if missing)
+#   3. Launch main menu loop (runs until user quits)
 # Note: Script requires bash and runs with set -euo pipefail for safety
 
-ensure_tools    # Install dependencies if needed
-main_menu       # Start interactive TUI
+check_deployment_mode  # Detect or prompt for VM vs container deployment
+ensure_tools           # Install dependencies if needed
+main_menu              # Start interactive TUI
