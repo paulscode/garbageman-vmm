@@ -1,8 +1,8 @@
 # Garbageman Nodes Manager
 
-**Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes**
+**Easy (hopefully!) setup for running multiple Bitcoin nodes (Garbageman or Bitcoin Knots)**
 
-Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle, each with its own Tor hidden service for maximum privacy. Choose between **Containers** (Docker/Podman) for lightweight efficiency or **Virtual Machines** (VMs) for greater stability on some systems.
+Run as many Bitcoin nodes as your computer can handle, with a choice between **Garbageman** (a Bitcoin Knots fork with Libre Relay spam prevention) or standard **Bitcoin Knots**. Each node gets its own Tor hidden service for maximum privacy. Choose between **Containers** (Docker/Podman) for lightweight efficiency or **Virtual Machines** (VMs) for greater stability on some systems.
 
 <img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/6af100e5-c873-4c26-b848-6a5ecdf17dbc" />
 
@@ -16,7 +16,8 @@ Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle,
 
 This script makes it **dead simple** (in theory) to:
 
-- ✅ Create a lightweight Bitcoin Garbageman node in a container **or** VM
+- ✅ Create a lightweight Bitcoin node (Garbageman or Bitcoin Knots) in a container **or** VM
+- ✅ Choose your node implementation: Garbageman (Libre Relay spam prevention) or Bitcoin Knots
 - ✅ Choose between Containers (lightweight, faster) or VMs (more stable on some systems)
 - ✅ Monitor the Initial Block Download (IBD) sync with a live progress display
 - ✅ Clone your synced node multiple times for redundancy
@@ -48,9 +49,10 @@ cd ~/garbageman-nm && git pull && ./garbageman-nm.sh
 ```
 
 That's it! The script will:
-1. Install any missing dependencies (asks for your password once)
-2. Show you a menu with clear options
-3. Guide you through each step
+1. Install any missing dependencies (asks for your sudo password once)
+2. Let you choose between Containers or VMs on first run
+3. Show you a menu with clear options
+4. Guide you through each step
 
 ---
 
@@ -84,12 +86,13 @@ That's it! The script will:
 - ~150MB overhead per container (runtime daemon)
 
 ### Virtual Machines (Legacy)
-**Best for:** Users who have experience instability with containers
+**Best for:** Users who experience instability with containers
 
 ✅ **Pros:**
 - Complete isolation from host/sandbox
 - Works with existing VM management tools
 - Full OS environment inside VM
+- Proven stable approach
 
 ❌ **Cons:**
 - Higher resource overhead (~200MB per VM)
@@ -131,16 +134,16 @@ That's it! The script will:
 ### What Gets Installed
 
 **For Container Mode:**
-- Container runtime: `docker` OR `podman` (script auto-detects which is available)
+- Container runtime: `docker` OR `podman` (script auto-detects which is available, installs Docker if neither exists)
 - Build tools: `git` (only if building from scratch)
-- Utilities: `jq`, `dialog`, `whiptail`
+- Utilities: `jq`, `dialog`, `whiptail`, `netcat`
 
 **For VM Mode:**
 - Virtualization: `qemu-kvm`, `libvirt-daemon-system`, `libvirt-clients`, `virtinst`, `libguestfs-tools`
-- Build tools: `git`, `cmake`, `gcc`
-- Utilities: `jq`, `dialog`, `whiptail`
+- Build tools: `git`, `cmake`, `gcc`, `g++` (only if building from scratch)
+- Utilities: `jq`, `dialog`, `whiptail`, `netcat`
 
-**All dependencies are installed automatically** when you first run the script.
+**All dependencies are installed automatically** when you first run the script. You'll be asked for your sudo password once to install packages.
 
 ---
 
@@ -332,14 +335,15 @@ Choose **"Create Base Container/VM"** from the menu. You have three options:
 
 **Option 3: Build from Scratch** (2+ hours compile, 24-28 hours sync)
 1. Build Docker image (Containers) or download Alpine Linux base (VMs)
-2. **Build Garbageman inside the container/VM** (typically takes 2+ hours, depending on your CPU)
-3. Configure Tor and Bitcoin services
-4. Create base instance ready to sync
+2. **Choose node implementation:** Garbageman (Libre Relay) or Bitcoin Knots
+3. **Build selected software inside the container/VM** (typically takes 2+ hours, depending on your CPU)
+4. Configure Tor and Bitcoin services
+5. Create base instance ready to sync
 
 **Container vs VM Build Differences:**
 - **Containers:** Multi-stage Dockerfile build (faster, more efficient)
 - **VMs:** Uses libguestfs to build inside Alpine VM (stable, proven approach)
-- Both compile from the same Garbageman source code
+- Both compile from the same source code repositories (Garbageman or Bitcoin Knots)
 - Both result in identical Bitcoin node behavior
 
 **After creation, you'll be prompted for sync resources:**
@@ -379,6 +383,8 @@ Choose **"Monitor Base Sync"** from the menu. This will:
    ║  Auto-refreshing every 5 seconds... Press 'q' to exit                          ║
    ╚════════════════════════════════════════════════════════════════════════════════╝
    ```
+   
+   > **Note:** Node Type will show "Libre Relay/Garbageman" for Garbageman nodes or "Bitcoin Knots" for standard Knots nodes.
 
    **For Containers:**
    ```
@@ -505,11 +511,13 @@ The script displays different menus depending on whether you're using Containers
 
 #### Option 1: Create Base Container/VM
 - **When to use:** First time setup
-- **What it does:** Creates your initial Garbageman node (container or VM)
+- **What it does:** Creates your initial Bitcoin node (container or VM) with your choice of implementation
+- **Node selection:** Choose between Garbageman (Libre Relay spam prevention) or Bitcoin Knots
 - **Three methods:** Import from GitHub (both container and VM), Import from file, Build from scratch
 - **Time:** Minutes (import) or 2+ hours (build from scratch)
 - **Deployment choice:** Locked after first base is created
 - **Modular imports:** New format separates blockchain from container/VM image for efficiency
+- **Binary selection:** All methods now allow choosing which node implementation to use
 
 #### Option 2: Monitor Base Sync
 - **When to use:** After creating the base, to sync the blockchain
@@ -526,6 +534,7 @@ The script displays different menus depending on whether you're using Containers
 - **Export feature (NEW MODULAR FORMAT):** 
   - Exports blockchain data separately (~20GB, split into GitHub-compatible 1.9GB parts)
   - Exports container/VM image separately (~500MB-1GB, without blockchain)
+  - Exports node binaries for both implementations (Garbageman and Bitcoin Knots)
   - Both components have matching timestamps for easy reassembly
   - All files SHA256 checksummed for integrity verification
   - Removes all sensitive data: Tor keys, SSH keys, peer databases, logs
@@ -601,6 +610,31 @@ The script uses a dedicated temporary SSH key for monitoring:
 - Stored in: `~/.cache/gm-monitor/`
 - Purpose: Poll `bitcoin-cli` RPC for sync progress
 - Not your personal SSH keys (isolated and safe)
+
+### Network Isolation (Container Mode)
+Each container runs in its **own network namespace** for complete isolation:
+- **Bridge networking** (not host networking): Each container has isolated networking
+- **Port exposure (base only, clearnet mode):** When CLEARNET_OK=yes, port 8333 is exposed on the base container
+  - Allows incoming clearnet P2P connections if you set up port forwarding on your router
+  - Only the base container exposes this port (no conflicts)
+  - Tor-only mode: No ports exposed (incoming connections via Tor only)
+- **Clones never expose ports:** Always Tor-only, would conflict with base if they tried
+- **Tor handles all incoming for Tor-only mode:** Via hidden service (.onion address)
+- **Outbound connections:** Work normally through container's network interface
+- **Benefits:**
+  - No conflicts with host services (e.g., if you run Tor or Bitcoin on your host)
+  - Each container's Tor instance is completely isolated
+  - Multiple clones can run simultaneously without any port conflicts
+  - Improved security through network namespace separation
+  - Base with clearnet can accept incoming connections from both clearnet and Tor
+  - All clones remain Tor-only for maximum privacy
+
+**Why this matters:** 
+- **Base with CLEARNET_OK=yes:** Exposes port 8333, allowing you to forward it on your router for incoming clearnet connections while still maintaining Tor connectivity
+- **Base with Tor-only:** No ports exposed, all incoming connections via Tor hidden service
+- **All clones:** Always Tor-only, never expose ports (would conflict with base)
+- Outbound connections work fine without port exposure
+- Each container gets its own .onion address for incoming Tor connections
 
 ---
 
@@ -908,13 +942,15 @@ podman exec gm-base bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininf
 
 **Garbageman** is a modified Bitcoin node (based on Bitcoin Knots) designed as a **defense against blockchain spam**.
 
+> **Note:** This script also supports running standard **Bitcoin Knots** nodes if you prefer not to use the Libre Relay spam prevention features. You can choose your preferred implementation during setup.
+
 **The Problem:**
 - Some users broadcast transactions to the Bitcoin network that most node operators consider spam (though technically valid)
 - **Libre Relay** is a network of nodes that intentionally relay this spam
 - Libre Relay nodes identify each other using a special flag (`NODE_LIBRE_RELAY`) to preferentially connect with each other
 - This creates a gaping, zero-friction pipeline for bad actors to bypass sane spam filtering policy norms and get their garbage into a block
 
-**The Solution:**
+**The Solution (Garbageman approach):**
 - **Garbageman** also advertises the `NODE_LIBRE_RELAY` flag
 - This tricks Libre Relay nodes into connecting with it
 - But instead of relaying spam, Garbageman **silently drops it**
@@ -923,16 +959,17 @@ podman exec gm-base bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininf
 
 **Think of it like:** Garbageman nodes act as "honeypots" that attract spam-relaying connections but don't forward the spam, helping to contain it.
 
-**Why run multiple Garbageman nodes?**
-- More Garbageman nodes = better coverage against spam relay networks
-- Each node with a unique Tor address can attract different spam-relaying peers
-- Helps protect the Bitcoin network's usability for monetary transactions
+**Why run multiple nodes?**
+- **Garbageman:** More nodes = better coverage against spam relay networks
+- **Bitcoin Knots:** Standard full nodes help validate and relay legitimate Bitcoin transactions
+- Each node with a unique Tor address can serve the network independently
+- Helps protect the Bitcoin network's usability and decentralization
 
 **Technical details:**
-- Based on Bitcoin Knots (a Bitcoin Core fork with additional features)
-- Functions as a full validating Bitcoin node
-- Tracks transactions to avoid detection by spam relayers
-- Otherwise behaves like any other Bitcoin node
+- Both implementations based on Bitcoin Knots (a Bitcoin Core fork with additional features)
+- Function as full validating Bitcoin nodes
+- Garbageman tracks transactions to avoid detection by spam relayers
+- Otherwise behave like standard Bitcoin nodes
 
 For deeper technical discussion, see:
 - [Bitcoin Dev mailing list discussion](https://gnusha.org/pi/bitcoindev/aDWfDI03I-Rakopb%40petertodd.org)
@@ -1039,6 +1076,40 @@ ssh -i ~/.cache/gm-monitor/gm_monitor_ed25519 root@<VM_IP>
 ```
 
 **Note:** SSH is only used for VMs. Containers use `docker exec` or `podman exec` instead.
+
+### Tor Not Starting in Container
+
+**Symptoms:** Monitor shows "Tor: not running" or "Tor: starting" indefinitely
+
+**Cause:** This can happen if:
+1. Your host system runs Tor and container was created with old host networking mode
+2. Container was imported from an older version of the script
+
+**Solution:** Recreate container with proper network isolation:
+
+```bash
+# Remove old container and volume
+docker rm -f gm-base
+docker volume rm garbageman-data
+
+# Re-import or rebuild (will use bridge networking)
+./garbageman-nm.sh
+# Choose: Create Base Container → Import from file (or Import from GitHub)
+```
+
+**Verify Tor is working:**
+```bash
+# Check if Tor process is running
+docker exec gm-base ps aux | grep tor
+
+# Check Tor logs
+docker logs gm-base 2>&1 | grep -i tor
+
+# Verify .onion address was created
+docker exec gm-base cat /var/lib/tor/bitcoin-service/hostname
+```
+
+**Why this happens:** Older versions used host networking which caused port conflicts. Current version uses bridge networking with isolated network namespaces.
 
 ---
 

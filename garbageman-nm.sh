@@ -304,8 +304,12 @@ container_runtime(){
 }
 
 # container_cmd: Wrapper for container runtime commands
-# Args: $@ = container command and arguments
-# Purpose: Abstracts Docker vs Podman differences
+# Args: $@ = container command and arguments (e.g., "run", "create", "exec", etc.)
+# Purpose: Abstracts Docker vs Podman differences and handles permissions
+# Behavior:
+#   - Docker: Uses sudo if user not in docker group
+#   - Podman: Runs rootless by default (no sudo needed)
+# Example: container_cmd run -d --name test alpine:latest
 container_cmd(){
   local runtime
   runtime=$(container_runtime)
@@ -1235,9 +1239,12 @@ build_garbageman_host(){
 # Resource usage: Controlled by LIBGUESTFS_MEMSIZE and LIBGUESTFS_SMP env vars
 build_garbageman_in_vm(){
   local disk="$1"
+  local repo="${2:-$GM_REPO}"
+  local branch="${3:-$GM_BRANCH}"
+  local is_tag="${4:-false}"
   
   echo "=========================================="
-  echo "Building Garbageman inside Alpine VM..."
+  echo "Building Bitcoin inside Alpine VM..."
   echo "This will take 2+ hours depending on your CPU."
   echo ""
   echo "Build VM resources: ${SYNC_VCPUS} vCPUs, ${SYNC_RAM_MB} MiB RAM"
@@ -1264,12 +1271,23 @@ build_garbageman_in_vm(){
   echo "✓ Build dependencies installed"
   echo ""
   
-  # Step 2: Clone the Garbageman repository
-  echo "Step 2/4: Cloning Garbageman repository..."
-  echo "Repository: $GM_REPO (branch: $GM_BRANCH)"
+  # Step 2: Clone the repository
+  echo "Step 2/4: Cloning Bitcoin repository..."
+  echo "Repository: $repo (${is_tag:+tag: }${branch})"
+  
+  # Use different git clone approach for tags vs branches
+  local git_clone_cmd
+  if [[ "$is_tag" == "true" ]]; then
+    # For tags: clone then checkout specific tag
+    git_clone_cmd="cd /tmp && git clone --depth 1 --branch '$branch' '$repo' garbageman"
+  else
+    # For branches: direct branch clone
+    git_clone_cmd="cd /tmp && git clone --branch '$branch' --depth 1 '$repo' garbageman"
+  fi
+  
   sudo virt-customize -a "$disk" \
     --no-selinux-relabel \
-    --run-command "cd /tmp && git clone --branch '$GM_BRANCH' --depth 1 '$GM_REPO' garbageman" \
+    --run-command "$git_clone_cmd" \
     2>&1 | grep -v "random seed" >&2
   if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     echo "❌ Failed to clone repository"
@@ -1292,7 +1310,7 @@ build_garbageman_in_vm(){
   echo "✓ CMake configuration complete"
   
   echo ""
-  echo "Step 3b/4: Compiling Garbageman (this takes 2+ hours)..."
+  echo "Step 3b/4: Compiling Bitcoin (this takes 2+ hours)..."
   echo ""
   echo "⚠️  BUILD IN PROGRESS - DO NOT INTERRUPT ⚠️"
   echo ""
@@ -2315,6 +2333,7 @@ Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
 # Supported inputs:
 #   - Unified export folder: gm-export-YYYYMMDD-HHMMSS/
 #     • Contains VM image archive (vm-image.tar.gz) plus blockchain parts (blockchain.tar.gz.partN)
+#     • Contains node binaries (bitcoind-gm/bitcoin-cli-gm or bitcoind-knots/bitcoin-cli-knots)
 #     • If only a container image is found, user is guided to the container import
 # Flow:
 #   1. Let user configure defaults (reserves, VM sizes, clearnet toggle)
@@ -2322,12 +2341,15 @@ Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
 #   3. Let user select which export to import
 #   4. Prefer VM image; if missing but container image present, show helpful guidance
 #   5. Verify checksums (SHA256SUMS)
-#   6. Extract VM archive, detect expected files (vm-disk.qcow2, *.xml)
-#   7. If blockchain parts present, reassemble/extract and inject into VM disk
-#   8. Copy disk image to /var/lib/libvirt/images/ and define VM
+#   6. Let user select node type (Garbageman or Bitcoin Knots) based on available binaries
+#   7. Extract VM archive, detect expected files (vm-disk.qcow2, *.xml)
+#   8. If blockchain parts present, reassemble/extract and inject into VM disk
+#   9. Inject selected node binaries (bitcoind, bitcoin-cli) into VM using virt-copy-in
+#   10. Copy disk image to /var/lib/libvirt/images/ and define VM
 # Notes:
 #   - Folder detection is flexible: either image type triggers listing in menu
 #   - Cross-guidance helps users pick the correct import path (VM vs container)
+#   - Node selection: Auto-selects if only one type available, presents menu if both
 # Prerequisites: Same as create_base_vm (ensures tools installed)
 # Side effects: Creates VM disk at /var/lib/libvirt/images/${VM_NAME}.qcow2
 import_base_vm(){
@@ -2425,10 +2447,71 @@ import_base_vm(){
   
   echo "✅ Checksum verified successfully"
   
+  # Let user select node type (Garbageman or Bitcoin Knots)
+  echo ""
+  echo "Checking available node implementations..."
+  
+  local node_choice
+  local binary_suffix
+  local has_gm=false
+  local has_knots=false
+  
+  # Check which binaries are available in the export
+  if [[ -f "$item_path/bitcoind-gm" ]] && [[ -f "$item_path/bitcoin-cli-gm" ]]; then
+    has_gm=true
+    echo "  ✓ Found Garbageman binaries (bitcoind-gm, bitcoin-cli-gm)"
+  fi
+  
+  if [[ -f "$item_path/bitcoind-knots" ]] && [[ -f "$item_path/bitcoin-cli-knots" ]]; then
+    has_knots=true
+    echo "  ✓ Found Bitcoin Knots binaries (bitcoind-knots, bitcoin-cli-knots)"
+  fi
+  
+  if [[ "$has_gm" == "false" ]] && [[ "$has_knots" == "false" ]]; then
+    pause "❌ No node binaries found in export!\n\nExpected: bitcoind-gm + bitcoin-cli-gm OR bitcoind-knots + bitcoin-cli-knots\n\nThis export may be from an older version of the script.\nPlease re-export or download a newer release."
+    return
+  fi
+  
+  # Build menu based on available binaries
+  local menu_opts=()
+  if [[ "$has_gm" == "true" ]]; then
+    menu_opts+=("1" "Garbageman")
+  fi
+  if [[ "$has_knots" == "true" ]]; then
+    menu_opts+=("2" "Bitcoin Knots")
+  fi
+  
+  if [[ ${#menu_opts[@]} -eq 0 ]]; then
+    pause "❌ No valid node binaries found in export"
+    return
+  elif [[ "$has_gm" == "true" ]] && [[ "$has_knots" == "true" ]]; then
+    # Both available, let user choose
+    node_choice=$(whiptail --title "Select Node Type" --menu \
+      "Choose which Bitcoin implementation to install:\n\nBoth are available in this export." 15 70 2 \
+      "${menu_opts[@]}" \
+      3>&1 1>&2 2>&3) || {
+        pause "Import cancelled."
+        return
+      }
+  else
+    # Only one available, auto-select it
+    node_choice="${menu_opts[0]}"
+    echo "  ℹ Only one implementation available, auto-selecting: ${menu_opts[1]}"
+  fi
+  
+  # Set binary suffix based on selection
+  if [[ "$node_choice" == "1" ]]; then
+    binary_suffix="-gm"
+    echo "Selected: Garbageman (Libre Relay)"
+  elif [[ "$node_choice" == "2" ]]; then
+    binary_suffix="-knots"
+    echo "Selected: Bitcoin Knots"
+  fi
+  
   # Show import confirmation
   if ! whiptail --title "Confirm Import" \
-    --yesno "Ready to import base VM from:\n\n${selected_basename}\n\nThis will:\n• Extract the archive\n• Import the disk image to /var/lib/libvirt/images/\n• Create the VM definition\n• Configure for this system\n\nProceed with import?" \
-    16 78; then
+    --yesno "Ready to import base VM from:\n\n${selected_basename}\n\nNode implementation: ${binary_suffix#-}\n\nThis will:\n• Extract the archive\n• Import the disk image to /var/lib/libvirt/images/\n• Install ${binary_suffix#-} binaries\n• Create the VM definition\n• Configure for this system\n\nProceed with import?" \
+    18 78; then
     pause "Import cancelled."
     return
   fi
@@ -2580,6 +2663,58 @@ import_base_vm(){
   sudo chown root:root "$dest_disk"
   sudo chmod 644 "$dest_disk"
   echo "    ✓ Disk image copied"
+  
+  # [3.5/7] Inject selected node binaries into VM disk
+  echo ""
+  echo "[3.5/7] Installing ${binary_suffix#-} binaries..."
+  
+  local src_bitcoind="$item_path/bitcoind${binary_suffix}"
+  local src_bitcoin_cli="$item_path/bitcoin-cli${binary_suffix}"
+  
+  # Create temporary directory for binaries
+  local temp_bin_dir="$HOME/.cache/gm-bin-temp-$$"
+  mkdir -p "$temp_bin_dir"
+  
+  # Copy binaries to temp with standard names for injection
+  cp "$src_bitcoind" "$temp_bin_dir/bitcoind" || {
+    rm -rf "$temp_bin_dir"
+    rm -rf "$temp_extract_dir"
+    pause "❌ Failed to prepare bitcoind binary"
+    return
+  }
+  
+  cp "$src_bitcoin_cli" "$temp_bin_dir/bitcoin-cli" || {
+    rm -rf "$temp_bin_dir"
+    rm -rf "$temp_extract_dir"
+    pause "❌ Failed to prepare bitcoin-cli binary"
+    return
+  }
+  
+  # Inject binaries into VM disk
+  if sudo virt-copy-in -a "$dest_disk" "$temp_bin_dir/bitcoind" "$temp_bin_dir/bitcoin-cli" /usr/local/bin/ 2>/dev/null; then
+    # Set correct permissions
+    sudo virt-customize -a "$dest_disk" --no-selinux-relabel \
+      --run-command "chmod 755 /usr/local/bin/bitcoind" \
+      --run-command "chmod 755 /usr/local/bin/bitcoin-cli" \
+      2>&1 | grep -v "random seed" >&2
+    
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+      echo "    ✓ Binaries installed: bitcoind, bitcoin-cli (${binary_suffix#-})"
+    else
+      rm -rf "$temp_bin_dir"
+      rm -rf "$temp_extract_dir"
+      pause "❌ Failed to set binary permissions"
+      return
+    fi
+  else
+    rm -rf "$temp_bin_dir"
+    rm -rf "$temp_extract_dir"
+    pause "❌ Failed to inject binaries into VM disk"
+    return
+  fi
+  
+  # Clean up temp binaries directory
+  rm -rf "$temp_bin_dir"
   
   # [4/7] Configure bitcoin.conf based on CLEARNET_OK setting
   echo ""
@@ -2917,6 +3052,7 @@ torcontrol=127.0.0.1:9051
 # Modular Design:
 #   - Downloads blockchain data separately from images
 #   - Downloads BOTH images (VM + container) for flexibility/switching later
+#   - Downloads node binaries (Garbageman and/or Bitcoin Knots)
 #   - Verifies checksums (unified SHA256SUMS when available)
 #   - Reassembles blockchain from split parts
 #   - Uses VM image for import; keeps container image for later use
@@ -2924,24 +3060,29 @@ torcontrol=127.0.0.1:9051
 #   1. Let user configure defaults (reserves, VM sizes, clearnet toggle)
 #   2. Fetch available releases from GitHub API
 #   3. Let user select a release tag
-#   4. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
-#   5. Download VM image (vm-image.tar.gz)
-#   6. Download container image (container-image.tar.gz)
-#   7. Verify checksums for parts and images (prefer SHA256SUMS)
-#   8. Reassemble blockchain from parts
-#   9. Extract VM image (vm-disk.qcow2, vm-definition.xml)
-#  10. Extract blockchain data
-#  11. Inject blockchain into VM disk using virt-tar-in
-#  12. Copy disk to /var/lib/libvirt/images/
-#  13. Import VM definition with virsh define
-#  14. Cleanup temporary files (keep original downloads)
-# Prerequisites: curl or wget, jq, virt-tar-in (libguestfs-tools)
-# Download Size: ~21GB (blockchain) + ~1GB (VM) + ~0.5GB (container) ≈ ~22.5GB total
+#   4. Parse release assets: blockchain parts, images, binaries, checksums
+#   5. Let user select node type (Garbageman or Bitcoin Knots) based on available binaries
+#   6. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
+#   7. Download VM image (vm-image.tar.gz)
+#   8. Download container image (container-image.tar.gz) - optional
+#   9. Download selected node binaries (bitcoind-gm/knots, bitcoin-cli-gm/knots)
+#  10. Verify checksums for parts and images (prefer SHA256SUMS)
+#  11. Reassemble blockchain from parts
+#  12. Extract VM image (vm-disk.qcow2, vm-definition.xml)
+#  13. Extract blockchain data
+#  14. Inject blockchain into VM disk using virt-tar-in
+#  15. Inject selected node binaries into VM disk using virt-copy-in
+#  16. Copy disk to /var/lib/libvirt/images/
+#  17. Import VM definition with virsh define
+#  18. Cleanup temporary files (keep original downloads)
+# Prerequisites: curl or wget, jq, virt-tar-in, virt-copy-in, virt-customize (libguestfs-tools)
+# Download Size: ~21GB (blockchain) + ~1GB (VM) + ~0.5GB (container) + ~0.1GB (binaries) ≈ ~22.6GB total
 # Benefits over old format:
 #   - Blockchain is separate (can be reused/shared)
 #   - Smaller per-image downloads for updates (~1GB VM, ~0.5GB container)
 #   - Download both once, then switch between VM/container without re-downloading blockchain
 #   - Downloaded files preserved for USB transfer to other computers
+#   - User choice between Garbageman (Libre Relay) and Bitcoin Knots
 # Side effects: Downloads to ~/Downloads/gm-export-*, imports complete VM to libvirt
 import_from_github(){
   local repo="paulscode/garbageman-nm"
@@ -3048,6 +3189,10 @@ import_from_github(){
   local container_image_url=""
   local container_image_name=""
   local sha256sums_url=""
+  local bitcoind_gm_url=""
+  local bitcoin_cli_gm_url=""
+  local bitcoind_knots_url=""
+  local bitcoin_cli_knots_url=""
   
   while IFS='|' read -r name url; do
     [[ -z "$name" ]] && continue
@@ -3066,6 +3211,15 @@ import_from_github(){
     elif [[ "$name" == "container-image.tar.gz" ]]; then
       container_image_name="$name"
       container_image_url="$url"
+    # Binary files
+    elif [[ "$name" == "bitcoind-gm" ]]; then
+      bitcoind_gm_url="$url"
+    elif [[ "$name" == "bitcoin-cli-gm" ]]; then
+      bitcoin_cli_gm_url="$url"
+    elif [[ "$name" == "bitcoind-knots" ]]; then
+      bitcoind_knots_url="$url"
+    elif [[ "$name" == "bitcoin-cli-knots" ]]; then
+      bitcoin_cli_knots_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
   
@@ -3085,10 +3239,74 @@ import_from_github(){
     echo "⚠️  Warning: No container image found in release (older format?)"
   fi
   
-  # Calculate approximate download sizes
+  # Check for binary files and let user select node type
+  echo ""
+  echo "Checking available node implementations..."
+  
+  local has_gm=false
+  local has_knots=false
+  local node_choice
+  local binary_suffix
+  
+  if [[ -n "$bitcoind_gm_url" ]] && [[ -n "$bitcoin_cli_gm_url" ]]; then
+    has_gm=true
+    echo "  ✓ Found Garbageman binaries"
+  fi
+  
+  if [[ -n "$bitcoind_knots_url" ]] && [[ -n "$bitcoin_cli_knots_url" ]]; then
+    has_knots=true
+    echo "  ✓ Found Bitcoin Knots binaries"
+  fi
+  
+  if [[ "$has_gm" == "false" ]] && [[ "$has_knots" == "false" ]]; then
+    pause "❌ No node binaries found in release!\n\nThis release may be from an older version.\nPlease choose a newer release or re-export."
+    return
+  fi
+  
+  # Build menu based on available binaries
+  local menu_opts=()
+  if [[ "$has_gm" == "true" ]]; then
+    menu_opts+=("1" "Garbageman")
+  fi
+  if [[ "$has_knots" == "true" ]]; then
+    menu_opts+=("2" "Bitcoin Knots")
+  fi
+  
+  if [[ "$has_gm" == "true" ]] && [[ "$has_knots" == "true" ]]; then
+    # Both available, let user choose
+    node_choice=$(whiptail --title "Select Node Type" --menu \
+      "Choose which Bitcoin implementation to install:\n\nBoth are available in this release." 15 70 2 \
+      "${menu_opts[@]}" \
+      3>&1 1>&2 2>&3) || {
+        echo "Cancelled."
+        return
+      }
+  else
+    # Only one available, auto-select it
+    node_choice="${menu_opts[0]}"
+    echo "  ℹ Only one implementation available, auto-selecting: ${menu_opts[1]}"
+  fi
+  
+  # Set binary suffix and URLs based on selection
+  local bitcoind_url=""
+  local bitcoin_cli_url=""
+  if [[ "$node_choice" == "1" ]]; then
+    binary_suffix="-gm"
+    bitcoind_url="$bitcoind_gm_url"
+    bitcoin_cli_url="$bitcoin_cli_gm_url"
+    echo "Selected: Garbageman (Libre Relay)"
+  elif [[ "$node_choice" == "2" ]]; then
+    binary_suffix="-knots"
+    bitcoind_url="$bitcoind_knots_url"
+    bitcoin_cli_url="$bitcoin_cli_knots_url"
+    echo "Selected: Bitcoin Knots"
+  fi
+  
+  # Calculate approximate download sizes (including binaries)
   local blockchain_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 )) GB"  # parts are ~1.9GB each
   local vm_size="~1 GB"
   local container_size="~500 MB"
+  local binaries_size="~100 MB"
   local total_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 + 2 )) GB"
   
   echo "Download plan:"
@@ -3212,6 +3430,46 @@ import_from_github(){
       }
     fi
   fi
+  
+  # Step 2c: Download selected node binaries
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 2c: Downloading Node Binaries"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  local bitcoind_filename="bitcoind${binary_suffix}"
+  local bitcoin_cli_filename="bitcoin-cli${binary_suffix}"
+  
+  echo "Downloading $bitcoind_filename..."
+  if [[ "$download_tool" == "curl" ]]; then
+    curl -L --progress-bar -o "$download_dir/$bitcoind_filename" "$bitcoind_url" || {
+      pause "❌ Failed to download bitcoind binary"
+      return
+    }
+  else
+    wget --show-progress -O "$download_dir/$bitcoind_filename" "$bitcoind_url" || {
+      pause "❌ Failed to download bitcoind binary"
+      return
+    }
+  fi
+  
+  echo "Downloading $bitcoin_cli_filename..."
+  if [[ "$download_tool" == "curl" ]]; then
+    curl -L --progress-bar -o "$download_dir/$bitcoin_cli_filename" "$bitcoin_cli_url" || {
+      pause "❌ Failed to download bitcoin-cli binary"
+      return
+    }
+  else
+    wget --show-progress -O "$download_dir/$bitcoin_cli_filename" "$bitcoin_cli_url" || {
+      pause "❌ Failed to download bitcoin-cli binary"
+      return
+    }
+  fi
+  
+  # Mark binaries as executable
+  chmod +x "$download_dir/$bitcoind_filename"
+  chmod +x "$download_dir/$bitcoin_cli_filename"
   
   # Step 3: Verify blockchain parts
   echo ""
@@ -3395,6 +3653,43 @@ import_from_github(){
     echo "    ⚠ Warning: Failed to fix ownership (may cause startup issues)"
   fi
   
+  # Step 6b: Inject selected node binaries into VM disk
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 6b: Injecting Node Binaries into VM"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  echo "Preparing binaries for injection..."
+  local binaries_temp="$HOME/.cache/gm-binaries-temp-$$"
+  mkdir -p "$binaries_temp"
+  
+  # Copy binaries to temp location with standard names
+  cp "$download_dir/$bitcoind_filename" "$binaries_temp/bitcoind"
+  cp "$download_dir/$bitcoin_cli_filename" "$binaries_temp/bitcoin-cli"
+  
+  echo "Injecting bitcoind and bitcoin-cli into VM..."
+  sudo virt-copy-in -a "$vm_disk" "$binaries_temp/bitcoind" "$binaries_temp/bitcoin-cli" /usr/local/bin/ || {
+    rm -rf "$binaries_temp"
+    pause "❌ Failed to inject binaries into VM disk"
+    return
+  }
+  
+  rm -rf "$binaries_temp"
+  echo "    ✓ Binaries injected"
+  
+  # Set permissions on binaries
+  echo "    Setting binary permissions..."
+  sudo virt-customize -a "$vm_disk" --no-selinux-relabel \
+    --run-command "chmod 755 /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli" \
+    2>&1 | grep -v "random seed" >&2
+  
+  if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+    echo "    ✓ Permissions set"
+  else
+    echo "    ⚠ Warning: Failed to set binary permissions"
+  fi
+  
   # Step 7: Import VM into libvirt
   echo ""
   echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -3436,7 +3731,7 @@ import_from_github(){
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
   echo ""
   echo "The base VM '$VM_NAME' has been created with:"
-  echo "  • VM image (Alpine Linux + Garbageman)"
+  echo "  • VM image (Alpine Linux + $([ "$binary_suffix" == "-gm" ] && echo "Garbageman" || echo "Bitcoin Knots"))"
   echo "  • Complete blockchain data"
   if [[ -n "$container_image_url" ]] && [[ -f "$download_dir/$container_image_name" ]]; then
     echo "  • Container image (downloaded for later use)"
@@ -3517,6 +3812,36 @@ create_base_vm_from_scratch(){
   # Verify libvirt is accessible before proceeding (catches permission issues early)
   check_libvirt_access
 
+  # Step 0: Let user choose node type (Garbageman or Bitcoin Knots)
+  local node_choice
+  node_choice=$(whiptail --title "Select Node Type" --menu \
+    "Choose which Bitcoin implementation to build:" 15 70 2 \
+    "1" "Garbageman" \
+    "2" "Bitcoin Knots" \
+    3>&1 1>&2 2>&3)
+  
+  if [[ -z "$node_choice" ]]; then
+    pause "Cancelled."
+    return
+  fi
+  
+  # Set repository and branch/tag based on selection
+  local GM_REPO GM_BRANCH GM_IS_TAG
+  if [[ "$node_choice" == "1" ]]; then
+    GM_REPO="https://github.com/chrisguida/bitcoin.git"
+    GM_BRANCH="garbageman-v29"
+    GM_IS_TAG="false"
+    echo "Selected: Garbageman (Libre Relay)"
+  elif [[ "$node_choice" == "2" ]]; then
+    GM_REPO="https://github.com/bitcoinknots/bitcoin.git"
+    GM_BRANCH="v29.2.knots20251010"
+    GM_IS_TAG="true"
+    echo "Selected: Bitcoin Knots"
+  else
+    pause "Invalid selection."
+    return
+  fi
+
   # Let user configure/edit defaults & clearnet toggle; show confirmation.
   if ! configure_defaults_direct; then
     pause "Cancelled."
@@ -3573,8 +3898,8 @@ create_base_vm_from_scratch(){
     return 1
   fi
   
-  # Build Garbageman inside the Alpine VM (native musl build)
-  build_garbageman_in_vm "$disk"
+  # Build Bitcoin inside the Alpine VM (native musl build)
+  build_garbageman_in_vm "$disk" "$GM_REPO" "$GM_BRANCH" "$GM_IS_TAG"
 
   # Configure bitcoin.conf and OpenRC service
   echo "Configuring Tor, bitcoin.conf and bitcoind service..."
@@ -3794,11 +4119,11 @@ get_peer_breakdown(){
     local subver=$(jq -r '.subver // ""' <<<"$peer" 2>/dev/null)
     local services=$(jq -r '.services // ""' <<<"$peer" 2>/dev/null)
     
-    # Check for Libre Relay bit (0x0400 = 1024 in decimal)
-    # Services is a hex string like "000000000000040d"
+    # Check for Libre Relay bit (bit 29: 0x20000000 = 536870912 in decimal)
+    # Services is a hex string like "000000000000040d" or "20000409"
     if [[ -n "$services" ]]; then
       local services_dec=$((16#${services}))
-      if (( (services_dec & 0x0400) != 0 )); then
+      if (( (services_dec & 0x20000000) != 0 )); then
         ((lr_gm++))
         continue
       fi
@@ -3827,13 +4152,15 @@ get_peer_breakdown(){
 
 # get_node_classification: Classify the running node on VM
 # Args: $1 = IP address of VM
-# Returns: Classification string based on the node's subver and services
-# Categories:
-#   Libre Relay/Garbageman: Has Libre Relay service bit (0x0400)
-#   Bitcoin Knots: subver contains "knots" or "Knots"
-#   Bitcoin Core pre-30: subver contains "Satoshi" and version < 30
-#   Bitcoin Core v30+: subver contains "Satoshi" and version >= 30
-#   Unknown: Doesn't match any of the above
+# Returns: Classification string based on the node's subversion and services
+# Detection Logic:
+#   1. Libre Relay/Garbageman: Has Libre Relay service bit 29 (0x20000000 hex = 536870912 dec)
+#      - Checked via localservices field in getnetworkinfo
+#   2. Bitcoin Knots: subversion field contains "knots" or "Knots"
+#   3. Bitcoin Core pre-30: subversion contains "Satoshi" and version < 30
+#   4. Bitcoin Core v30+: subversion contains "Satoshi" and version >= 30
+#   5. Unknown: Doesn't match any of the above
+# Note: Returns empty string if RPC not ready yet
 get_node_classification(){
   local ip="$1"
   local netinfo
@@ -3846,7 +4173,7 @@ get_node_classification(){
     return
   fi
   
-  local subver=$(jq -r '.subver // ""' <<<"$netinfo" 2>/dev/null)
+  local subver=$(jq -r '.subversion // ""' <<<"$netinfo" 2>/dev/null)
   local services=$(jq -r '.localservices // ""' <<<"$netinfo" 2>/dev/null)
   
   # Check if localservices is available yet (empty means not ready)
@@ -3855,13 +4182,14 @@ get_node_classification(){
     return
   fi
   
-  # Check for Libre Relay bit (0x0400 = 1024 in decimal)
-  # Now we know services field is populated, so we can safely parse it
+  # Check for Libre Relay bit (bit 29: 0x20000000 = 536870912 in decimal)
+  # localservices is returned as a hexadecimal string
   local services_dec=0
   if [[ "$services" =~ ^[0-9a-fA-F]+$ ]]; then
     services_dec=$((16#${services}))
   fi
-  if (( (services_dec & 0x0400) != 0 )); then
+  
+  if (( (services_dec & 0x20000000) != 0 )); then
     echo "Libre Relay/Garbageman"
     return
   fi
@@ -3870,15 +4198,19 @@ get_node_classification(){
   # Check user agent string patterns
   if [[ "$subver" =~ [Kk]nots ]]; then
     echo "Bitcoin Knots"
+    return
   elif [[ "$subver" =~ /Satoshi:([0-9]+)\. ]]; then
     local version="${BASH_REMATCH[1]}"
     if [[ "$version" -ge 30 ]]; then
       echo "Bitcoin Core v30+"
+      return
     else
       echo "Bitcoin Core pre-30"
+      return
     fi
   else
     echo "Unknown"  # Other implementation with Libre Relay bit = 0
+    return
   fi
 }
 
@@ -3911,11 +4243,11 @@ debug_node_classification(){
     return
   fi
   
-  local subver=$(echo "$netinfo" | jq -r '.subver // ""' 2>/dev/null)
+  local subver=$(echo "$netinfo" | jq -r '.subversion // ""' 2>/dev/null)
   local services=$(echo "$netinfo" | jq -r '.localservices // ""' 2>/dev/null)
   
   echo "Parsed values:"
-  echo "  subver: '$subver'"
+  echo "  subversion: '$subver'"
   echo "  services: '$services'"
   echo ""
   
@@ -3927,8 +4259,8 @@ debug_node_classification(){
   local services_dec=0
   if [[ "$services" =~ ^[0-9a-fA-F]+$ ]]; then
     services_dec=$((16#${services}))
-    echo "  services_dec: $services_dec"
-    echo "  Libre Relay bit (0x0400 = 1024): $(( (services_dec & 0x0400) != 0 ? 1 : 0 ))"
+    echo "  services_dec: $services_dec (parsed from hex)"
+    echo "  Libre Relay bit 29 (0x20000000 = 536870912): $(( (services_dec & 0x20000000) != 0 ? 1 : 0 ))"
   else
     echo "  services format invalid"
   fi
@@ -4746,6 +5078,7 @@ export_base_vm(){
   local blocks=""
   local headers=""
   local blockchain_height="unknown"
+  local node_type=""
   local was_running=true
   
   if [[ "$current_state" == "running" ]]; then
@@ -4761,6 +5094,8 @@ export_base_vm(){
       
       if [[ -n "$blocks" ]]; then
         blockchain_height="$blocks"
+        # Also get node type while we're at it
+        node_type=$(get_node_classification "$ip")
       fi
       
       if [[ -n "$blocks" && -n "$headers" && "$blocks" != "$headers" ]]; then
@@ -4799,21 +5134,26 @@ export_base_vm(){
           info=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockchaininfo 2>/dev/null' 2>/dev/null || echo "")
           blocks=$(jq -r '.blocks // ""' <<<"$info" 2>/dev/null || echo "")
           
-          if [[ -n "$blocks" ]]; then
-            blockchain_height="$blocks"
-            headers=$(jq -r '.headers // ""' <<<"$info" 2>/dev/null || echo "")
-            if [[ -n "$headers" && "$blocks" != "$headers" ]]; then
-              sync_warning="\n⚠️  WARNING: Blockchain may not be fully synced (blocks: $blocks / $headers)"
-            fi
-            break
-          fi
-          wait_count=$((wait_count + 1))
-          sleep 5
-        done
-        
-        if [[ -z "$blocks" ]]; then
-          echo "⚠️  bitcoind did not respond in time, block height will be 'unknown'"
+      if [[ -n "$blocks" ]]; then
+        blockchain_height="$blocks"
+        # Also get node type while we're at it
+        node_type=$(get_node_classification "$ip")
+        headers=$(jq -r '.headers // ""' <<<"$info" 2>/dev/null || echo "")
+        if [[ -n "$headers" && "$blocks" != "$headers" ]]; then
+          sync_warning="\n⚠️  WARNING: Blockchain may not be fully synced (blocks: $blocks / $headers)"
         fi
+        # Only break if we got a valid node type (not empty)
+        if [[ -n "$node_type" ]]; then
+          break
+        fi
+      fi
+      wait_count=$((wait_count + 1))
+      sleep 5
+    done
+    
+    if [[ -z "$blocks" ]]; then
+      echo "⚠️  bitcoind did not respond in time, block height will be 'unknown'"
+    fi
       else
         echo "⚠️  Failed to get VM IP address, block height will be 'unknown'"
       fi
@@ -4870,7 +5210,7 @@ Proceed with export?" 26 78; then
   # Export directly to main folder (flat structure)
   local blockchain_export_dir="$export_dir"
   
-  echo "[1/6] Extracting blockchain from VM disk..."
+  echo "[1/7] Extracting blockchain from VM disk..."
   local vm_disk="/var/lib/libvirt/images/${VM_NAME}.qcow2"
   local temp_blockchain="$blockchain_export_dir/.tmp-blockchain"
   mkdir -p "$temp_blockchain" || die "Failed to create temporary blockchain directory"
@@ -4884,7 +5224,7 @@ Proceed with export?" 26 78; then
   echo "    ✓ Blockchain extracted"
   
   echo ""
-  echo "[2/6] Sanitizing sensitive data..."
+  echo "[2/7] Sanitizing sensitive data..."
   # Remove sensitive files that shouldn't be in public exports
   rm -f "$temp_blockchain/peers.dat" 2>/dev/null || true
   rm -f "$temp_blockchain/anchors.dat" 2>/dev/null || true
@@ -4914,7 +5254,7 @@ Proceed with export?" 26 78; then
   echo "      - Mempool and fee estimate data"
   
   echo ""
-  echo "[3/6] Compressing sanitized blockchain..."
+  echo "[3/7] Compressing sanitized blockchain..."
   tar czf "$blockchain_export_dir/blockchain-data.tar.gz" -C "$temp_blockchain" . || {
     rm -rf "$export_dir"
     die "Failed to compress blockchain data"
@@ -4928,7 +5268,7 @@ Proceed with export?" 26 78; then
   echo "    ✓ Blockchain compressed ($blockchain_size)"
   
   echo ""
-  echo "[4/6] Splitting blockchain for GitHub (1.9GB parts)..."
+  echo "[4/7] Splitting blockchain for GitHub (1.9GB parts)..."
   cd "$blockchain_export_dir"
   split -b 1900M -d -a 2 "blockchain-data.tar.gz" "blockchain.tar.gz.part"
   
@@ -4953,7 +5293,7 @@ Proceed with export?" 26 78; then
   echo "    ✓ Split into $part_count parts"
   
   echo ""
-  echo "[5/6] Creating manifest..."
+  echo "[5/7] Creating manifest..."
   
   # Create manifest
   cat > MANIFEST.txt << EOF
@@ -5003,6 +5343,61 @@ Total Size: $(du -ch blockchain.tar.gz.part* | tail -n1 | cut -f1)
 EOF
   
   echo "    ✓ Blockchain export complete (sanitized)"
+  
+  # Step 1.5: Export binaries if node type is Garbageman or Knots
+  # Note: node_type was already detected earlier when we queried blockchain height
+  echo ""
+  echo "[6/7] Checking if blockchain export includes binary-compatible data..."
+  echo "    ✓ Blockchain data export complete"
+  
+  echo ""
+  echo "[7/7] Exporting binaries (if applicable)..."
+  echo "    Node type: ${node_type:-Unknown}"
+  
+  # Export binaries if node type is Garbageman or Knots
+  if [[ "$node_type" == "Libre Relay/Garbageman" ]] || [[ "$node_type" == "Bitcoin Knots" ]]; then
+    echo "    Extracting binaries from VM disk..."
+    
+    # Determine binary suffix based on node type
+    local binary_suffix=""
+    if [[ "$node_type" == "Libre Relay/Garbageman" ]]; then
+      binary_suffix="-gm"
+    elif [[ "$node_type" == "Bitcoin Knots" ]]; then
+      binary_suffix="-knots"
+    fi
+    
+    # Extract bitcoind and bitcoin-cli from VM disk
+    local temp_binaries="$export_dir/.tmp-binaries"
+    mkdir -p "$temp_binaries" || die "Failed to create temporary binaries directory"
+    
+    # Use virt-copy-out to extract binaries
+    if sudo virt-copy-out -a "$vm_disk" /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli "$temp_binaries/" 2>/dev/null; then
+      # Rename and move to export directory
+      mv "$temp_binaries/bitcoind" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null || true
+      mv "$temp_binaries/bitcoin-cli" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null || true
+      
+      # Fix ownership (virt-copy-out runs as root)
+      sudo chown "$USER:$USER" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null || true
+      
+      # Clean up temp directory
+      rm -rf "$temp_binaries"
+      
+      # Generate checksums for binaries
+      if [[ -f "$export_dir/bitcoind${binary_suffix}" ]] && [[ -f "$export_dir/bitcoin-cli${binary_suffix}" ]]; then
+        (cd "$export_dir" && sha256sum "bitcoind${binary_suffix}" "bitcoin-cli${binary_suffix}" >> SHA256SUMS.binaries)
+        echo "    ✓ Binaries exported as: bitcoind${binary_suffix}, bitcoin-cli${binary_suffix}"
+        echo "    ✓ Binary checksums saved to SHA256SUMS.binaries"
+      else
+        echo "    ⚠️  Warning: Failed to rename binaries"
+      fi
+    else
+      echo "    ⚠️  Warning: Failed to extract binaries from VM disk"
+      rm -rf "$temp_binaries"
+    fi
+  else
+    echo "    Node type is not Garbageman or Knots - skipping binary export"
+  fi
   
   # Step 2: Shut down base VM if we started it or if it was already running
   echo ""
@@ -5360,7 +5755,17 @@ METADATA
   
   # Generate combined checksums for all files
   echo "      Generating checksums..."
+  
+  # Start with blockchain parts and VM archive
   (cd "$export_dir" && sha256sum blockchain.tar.gz.part* "${vm_archive_name}" > SHA256SUMS)
+  
+  # Add binaries if they exist
+  if [[ -f "$export_dir/SHA256SUMS.binaries" ]]; then
+    echo "" >> "$export_dir/SHA256SUMS"
+    echo "# Bitcoin binaries:" >> "$export_dir/SHA256SUMS"
+    cat "$export_dir/SHA256SUMS.binaries" >> "$export_dir/SHA256SUMS"
+    rm -f "$export_dir/SHA256SUMS.binaries"  # Clean up temporary file
+  fi
   
   # Add reassembled blockchain checksum
   echo "" >> "$export_dir/SHA256SUMS"
@@ -6005,6 +6410,34 @@ create_base_container(){
 # Similar to create_base_vm_from_scratch() but uses container technology instead of VMs
 # Note: bitcoin.conf is embedded in image for reference but overridden by volume-based config
 create_base_container_from_scratch(){
+  # Step 0: Let user choose node type (Garbageman or Bitcoin Knots)
+  local node_choice
+  node_choice=$(whiptail --title "Select Node Type" --menu \
+    "Choose which Bitcoin implementation to build:" 15 70 2 \
+    "1" "Garbageman" \
+    "2" "Bitcoin Knots" \
+    3>&1 1>&2 2>&3)
+  
+  if [[ -z "$node_choice" ]]; then
+    return
+  fi
+  
+  # Set repository and branch/tag based on selection
+  local GM_REPO GM_BRANCH GM_IS_TAG
+  if [[ "$node_choice" == "1" ]]; then
+    GM_REPO="https://github.com/chrisguida/bitcoin.git"
+    GM_BRANCH="garbageman-v29"
+    GM_IS_TAG="false"
+    echo "Selected: Garbageman (Libre Relay)"
+  elif [[ "$node_choice" == "2" ]]; then
+    GM_REPO="https://github.com/bitcoinknots/bitcoin.git"
+    GM_BRANCH="v29.2.knots20251010"
+    GM_IS_TAG="true"
+    echo "Selected: Bitcoin Knots"
+  else
+    return
+  fi
+
   # Let user configure defaults (container-specific prompts)
   if ! configure_defaults_container; then
     return
@@ -6026,16 +6459,18 @@ create_base_container_from_scratch(){
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
   echo ""
   echo "This will:"
-  echo "  1. Create a Dockerfile for Alpine Linux with Garbageman"
-  echo "  2. Build the container image (includes compiling Bitcoin - takes 2+ hours)"
-  echo "  3. Configure Tor and bitcoind"
-  echo "  4. Inject bitcoin.conf into volume"
-  echo "  5. Create and start the container"
+  echo "  1. Let you choose node type (Garbageman/Libre Relay or Bitcoin Knots)"
+  echo "  2. Create a Dockerfile for Alpine Linux with Bitcoin"
+  echo "  3. Build the container image (includes compiling Bitcoin - takes 2+ hours)"
+  echo "  4. Configure Tor and bitcoind with proper directory setup"
+  echo "  5. Inject bitcoin.conf into volume"
+  echo "  6. Create and start the container with bridge networking"
   echo ""
   echo "Container will use:"
   echo "  • Initial sync: ${SYNC_VCPUS} CPUs, ${SYNC_RAM_MB}MB RAM"
   echo "  • After sync: ${VM_VCPUS} CPUs, ${VM_RAM_MB}MB RAM"
   echo "  • Network: ${CLEARNET_OK} clearnet during sync (clones are Tor-only)"
+  echo "  • Isolated network namespace (not host networking)"
   echo ""
   
   if ! whiptail --title "Confirm Container Creation" --yesno \
@@ -6052,6 +6487,8 @@ create_base_container_from_scratch(){
   echo "[1/6] Creating Dockerfile..."
   
   # Determine bitcoin.conf based on CLEARNET_OK
+  # Clearnet mode: Allows both IPv4 and Tor connections
+  # Tor-only mode: Forces all connections through Tor SOCKS proxy
   local bitcoin_conf_content
   if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
     # Clearnet + Tor: Allow both IPv4 and onion, proxy only for onion connections
@@ -6115,9 +6552,9 @@ RUN addgroup -S bitcoin && \
 # Create directories
 RUN mkdir -p /var/lib/bitcoin /etc/bitcoin
 
-# Clone and build Garbageman
+# Clone and build Bitcoin
 WORKDIR /tmp/garbageman
-RUN git clone --branch GM_BRANCH --depth 1 GM_REPO . && \
+RUN GM_GIT_CLONE_CMD && \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_GUI=OFF \
@@ -6180,12 +6617,20 @@ CMD ["bitcoind", "-conf=/etc/bitcoin/bitcoin.conf", "-datadir=/var/lib/bitcoin"]
 DOCKERFILE
 
   # Replace placeholders in Dockerfile
-  sed -i "s|GM_REPO|$GM_REPO|g" "$build_dir/Dockerfile"
-  sed -i "s|GM_BRANCH|$GM_BRANCH|g" "$build_dir/Dockerfile"
+  # Build the git clone command based on whether using branch or tag
+  local git_clone_cmd
+  if [[ "$GM_IS_TAG" == "true" ]]; then
+    git_clone_cmd="git clone --depth 1 --branch '$GM_BRANCH' '$GM_REPO' ."
+  else
+    git_clone_cmd="git clone --branch '$GM_BRANCH' --depth 1 '$GM_REPO' ."
+  fi
+  
+  sed -i "s|GM_GIT_CLONE_CMD|$git_clone_cmd|g" "$build_dir/Dockerfile"
   
   # Create entrypoint script with graceful shutdown handling
   # Key features:
-  #   - Starts Tor and bitcoind in background
+  #   - Creates /run/tor directory (required for Tor's control.authcookie)
+  #   - Starts Tor and bitcoind in background with proper user permissions
   #   - Traps SIGTERM/SIGINT for graceful shutdown
   #   - Sends bitcoin-cli stop and waits up to 180s for clean exit
   #   - Ensures blockchain data is properly flushed before container stops
@@ -6198,11 +6643,16 @@ echo "Date: $(date)"
 echo ""
 
 # Ensure Tor directories exist with correct ownership BEFORE starting Tor
+# Critical: /run/tor must exist for Tor to write control.authcookie
+# Note: /run is a tmpfs that gets cleared on container restart
 echo "Setting up Tor directories..."
 mkdir -p /var/lib/tor/bitcoin-service
+mkdir -p /run/tor
 chown -R tor:tor /var/lib/tor
+chown tor:tor /run/tor
 chmod 700 /var/lib/tor
 chmod 700 /var/lib/tor/bitcoin-service
+chmod 755 /run/tor
 
 # Start Tor in background as tor user
 echo "Starting Tor..."
@@ -6210,7 +6660,7 @@ su-exec tor tor -f /etc/tor/torrc &
 TOR_PID=$!
 echo "Tor PID: $TOR_PID"
 
-# Wait for Tor to be ready
+# Wait for Tor to be ready (checks for SOCKS proxy port)
 echo "Waiting for Tor SOCKS proxy on 127.0.0.1:9050..."
 for i in {1..30}; do
   if nc -z 127.0.0.1 9050 2>/dev/null; then
@@ -6418,7 +6868,13 @@ BTCCONF
 # get_peer_breakdown_container: Analyze peer user agents in container and categorize them
 # Args: $1 = Container name
 # Returns: Formatted string like "21 (5 LR/GM, 3 KNOTS, 2 OLDCORE, 7 COREv30+, 4 OTHER)"
-# Categories match VM version for consistency
+# Detection Logic (same as VM version):
+#   1. LR/GM: Has Libre Relay service bit 29 (0x20000000) in services field
+#   2. KNOTS: subver contains "knots" or "Knots"
+#   3. OLDCORE: subver contains "Satoshi" and version < 30
+#   4. COREv30+: subver contains "Satoshi" and version >= 30
+#   5. OTHER: Everything else
+# Note: Uses getpeerinfo RPC command which provides both subver and services
 get_peer_breakdown_container(){
   local container_name="$1"
   local peerinfo
@@ -6442,11 +6898,11 @@ get_peer_breakdown_container(){
     local subver=$(echo "$peer" | jq -r '.subver // ""' 2>/dev/null)
     local services=$(echo "$peer" | jq -r '.services // ""' 2>/dev/null)
     
-    # Check for Libre Relay bit (0x0400 = 1024 in decimal)
-    # Services is a hex string like "000000000000040d"
+    # Check for Libre Relay bit (bit 29: 0x20000000 = 536870912 in decimal)
+    # Services is a hex string like "000000000000040d" or "20000409"
     if [[ -n "$services" ]]; then
       local services_dec=$((16#${services}))
-      if (( (services_dec & 0x0400) != 0 )); then
+      if (( (services_dec & 0x20000000) != 0 )); then
         ((lr_gm++))
         continue
       fi
@@ -6475,13 +6931,15 @@ get_peer_breakdown_container(){
 
 # get_node_classification_container: Classify the running node in container
 # Args: $1 = Container name
-# Returns: Classification string based on the node's subver and services
-# Categories:
-#   Libre Relay/Garbageman: Has Libre Relay service bit (0x0400)
-#   Bitcoin Knots: subver contains "knots" or "Knots"
-#   Bitcoin Core pre-30: subver contains "Satoshi" and version < 30
-#   Bitcoin Core v30+: subver contains "Satoshi" and version >= 30
-#   Unknown: Doesn't match any of the above
+# Returns: Classification string based on the node's subversion and services
+# Detection Logic:
+#   1. Libre Relay/Garbageman: Has Libre Relay service bit 29 (0x20000000 hex = 536870912 dec)
+#      - Checked via localservices field in getnetworkinfo
+#   2. Bitcoin Knots: subversion field contains "knots" or "Knots"
+#   3. Bitcoin Core pre-30: subversion contains "Satoshi" and version < 30
+#   4. Bitcoin Core v30+: subversion contains "Satoshi" and version >= 30
+#   5. Unknown: Doesn't match any of the above
+# Note: Returns empty string if RPC not ready yet
 get_node_classification_container(){
   local container_name="$1"
   local netinfo
@@ -6494,7 +6952,7 @@ get_node_classification_container(){
     return
   fi
   
-  local subver=$(echo "$netinfo" | jq -r '.subver // ""' 2>/dev/null)
+  local subver=$(echo "$netinfo" | jq -r '.subversion // ""' 2>/dev/null)
   local services=$(echo "$netinfo" | jq -r '.localservices // ""' 2>/dev/null)
   
   # Check if localservices is available yet (empty means not ready)
@@ -6503,13 +6961,14 @@ get_node_classification_container(){
     return
   fi
   
-  # Check for Libre Relay bit (0x0400 = 1024 in decimal)
-  # Now we know services field is populated, so we can safely parse it
+  # Check for Libre Relay bit (bit 29: 0x20000000 = 536870912 in decimal)
+  # localservices is returned as a hexadecimal string
   local services_dec=0
   if [[ "$services" =~ ^[0-9a-fA-F]+$ ]]; then
     services_dec=$((16#${services}))
   fi
-  if (( (services_dec & 0x0400) != 0 )); then
+  
+  if (( (services_dec & 0x20000000) != 0 )); then
     echo "Libre Relay/Garbageman"
     return
   fi
@@ -6518,15 +6977,19 @@ get_node_classification_container(){
   # Check user agent string patterns
   if [[ "$subver" =~ [Kk]nots ]]; then
     echo "Bitcoin Knots"
+    return
   elif [[ "$subver" =~ /Satoshi:([0-9]+)\. ]]; then
     local version="${BASH_REMATCH[1]}"
     if [[ "$version" -ge 30 ]]; then
       echo "Bitcoin Core v30+"
+      return
     else
       echo "Bitcoin Core pre-30"
+      return
     fi
   else
     echo "Unknown"  # Other implementation with Libre Relay bit = 0
+    return
   fi
 }
 
@@ -7477,8 +7940,12 @@ container_management_menu(){
 # Purpose: Show real-time status with auto-refresh (container version of monitor_vm_status)
 # Args: $1 = container name to monitor
 # Display: Auto-refreshing every 5 seconds, press 'q' to exit
-# Shows: State, .onion address, blocks/headers, peers, resources
+# Shows: State, .onion address (from Tor hidden service), blocks/headers, peers, resources
 #        IPv4 address (only for base container with CLEARNET_OK=yes)
+# Network Detection:
+#   - Tor: Checks multiple paths (/var/lib/tor/bitcoin-service/hostname, /hidden_service/hostname)
+#   - IPv4: Detects from localaddresses or network reachability status
+#   - Handles "starting" state while services initialize
 monitor_container_status(){
   local container_name="$1"
   
@@ -7497,17 +7964,35 @@ monitor_container_status(){
     
     # If running, get network info
     if [[ "$state" == "up" ]]; then
-      # Get .onion address
-      onion=$(container_exec "$container_name" cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null || echo "unknown")
+      # Get .onion address - try multiple possible paths
+      onion=$(container_exec "$container_name" cat /var/lib/tor/bitcoin-service/hostname 2>/dev/null || \
+              container_exec "$container_name" cat /var/lib/tor/hidden_service/hostname 2>/dev/null || \
+              echo "")
+      
+      # If onion is still empty, check if Tor is running
+      if [[ -z "$onion" ]]; then
+        local tor_status=$(container_exec "$container_name" pgrep tor >/dev/null 2>&1 && echo "starting" || echo "not running")
+        onion="$tor_status"
+      fi
       
       # Check if this is the base container and if clearnet is enabled
       local ipv4_address=""
       if [[ "$container_name" == "$CONTAINER_NAME" ]] && [[ "${CLEARNET_OK,,}" == "yes" ]]; then
-        # Get IPv4 address for base container when clearnet is enabled
-        ipv4_address=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null | jq -r '.localaddresses[] | select(.network=="ipv4") | .address' 2>/dev/null | head -n1 || echo "")
+        # Get network info first (we'll need it for both IPv4 detection and peer info)
+        local netinfo
+        netinfo=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null || echo "")
+        
+        # Try to get IPv4 from localaddresses in networkinfo
+        ipv4_address=$(echo "$netinfo" | jq -r '.localaddresses[]? | select(.network=="ipv4") | .address' 2>/dev/null | head -n1 || echo "")
+        
+        # If that didn't work, check if we have outbound IPv4 connections (networks field)
         if [[ -z "$ipv4_address" ]]; then
-          # Fallback: try to get from container's network interface
-          ipv4_address=$(container_exec "$container_name" ip -4 addr show eth0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "detecting...")
+          local has_ipv4=$(echo "$netinfo" | jq -r '.networks[]? | select(.name=="ipv4") | .reachable' 2>/dev/null || echo "false")
+          if [[ "$has_ipv4" == "true" ]]; then
+            ipv4_address="enabled (no public address)"
+          else
+            ipv4_address="not reachable"
+          fi
         fi
       fi
       
@@ -7519,9 +8004,11 @@ monitor_container_status(){
       vp=$(jq -r '.verificationprogress // 0' <<<"$info" 2>/dev/null || echo "0")
       ibd=$(jq -r '.initialblockdownload // "?"' <<<"$info" 2>/dev/null || echo "?")
       
-      # Get network info
-      local netinfo
-      netinfo=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null || echo "")
+      # Get network info (only if not already fetched for clearnet detection)
+      if [[ -z "$netinfo" ]]; then
+        local netinfo
+        netinfo=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null || echo "")
+      fi
       peers=$(jq -r '.connections // "?"' <<<"$netinfo" 2>/dev/null || echo "?")
       
       # Get detailed peer breakdown
@@ -7794,16 +8281,17 @@ export_base_container(){
   echo "  2. Blockchain data (split into parts) - can be reused across exports"
   echo ""
   
-  # Step 1: Get blockchain height (start container if needed)
+  # Step 1: Get blockchain height and node type (start container if needed)
   echo "═══════════════════════════════════════════════════════════════════════════════"
   echo "Step 1: Prepare Container"
   echo "═══════════════════════════════════════════════════════════════════════════════"
   echo ""
-  echo "[1/3] Getting blockchain height..."
+  echo "[1/4] Getting blockchain height and node type..."
   local blocks="unknown"
+  local node_type=""
   local was_running=true
   
-  if ! container_is_running "$CONTAINER_NAME"; then
+  if [[ "$(container_state "$CONTAINER_NAME")" != "up" ]]; then
     echo "    Container is stopped, starting temporarily to query blockchain..."
     was_running=false
     
@@ -7818,7 +8306,12 @@ export_base_container(){
       while [[ $wait_count -lt $max_wait ]]; do
         blocks=$(container_exec "$CONTAINER_NAME" /usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockcount 2>/dev/null || echo "")
         if [[ -n "$blocks" && "$blocks" != "unknown" ]]; then
-          break
+          # Also get node type while we're at it
+          node_type=$(get_node_classification_container "$CONTAINER_NAME")
+          # Only break if we got a valid node type (not empty)
+          if [[ -n "$node_type" ]]; then
+            break
+          fi
         fi
         wait_count=$((wait_count + 1))
         sleep 5
@@ -7832,20 +8325,28 @@ export_base_container(){
   else
     # Container already running, query directly
     blocks=$(container_exec "$CONTAINER_NAME" /usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getblockcount 2>/dev/null || echo "unknown")
+    # Also get node type
+    node_type=$(get_node_classification_container "$CONTAINER_NAME")
   fi
   echo "    Block height: $blocks"
+  echo "    Node type: ${node_type:-Unknown}"
   
   echo ""
-  echo "[2/3] Ensuring container is stopped..."
+  echo "[2/4] Ensuring container is stopped..."
   if ! ensure_container_stopped "$CONTAINER_NAME"; then
     die "Failed to stop container"
   fi
   echo "    ✓ Container stopped"
   
   echo ""
-  echo "[3/3] Waiting for clean shutdown..."
+  echo "[3/4] Waiting for clean shutdown..."
   sleep 2  # Give it a moment to fully release resources
   echo "    ✓ Ready for export"
+  
+  echo ""
+  echo "[4/4] Node type will be used later for binary export..."
+  echo "    Node type: ${node_type:-Unknown}"
+  echo "    ✓ Container preparation complete"
   
   # Step 2: Export blockchain data (with sanitization)
   echo ""
@@ -7857,7 +8358,7 @@ export_base_container(){
   # Export directly to main folder (flat structure)
   local blockchain_export_dir="$export_dir"
   
-  echo "[1/6] Extracting blockchain from volume..."
+  echo "[1/7] Extracting blockchain from volume..."
   local temp_blockchain="$blockchain_export_dir/.tmp-blockchain"
   mkdir -p "$temp_blockchain" || die "Failed to create temporary blockchain directory"
   
@@ -7874,7 +8375,7 @@ export_base_container(){
   echo "    ✓ Blockchain extracted"
   
   echo ""
-  echo "[2/6] Sanitizing sensitive data..."
+  echo "[2/7] Sanitizing sensitive data..."
   # Remove sensitive files that shouldn't be in public exports
   # Use sudo because files are owned by root (extracted from container)
   sudo rm -f "$temp_blockchain/peers.dat" 2>/dev/null || true
@@ -7907,7 +8408,7 @@ export_base_container(){
   echo "      - bitcoin.conf (importer will regenerate based on their preferences)"
   
   echo ""
-  echo "[3/6] Compressing sanitized blockchain..."
+  echo "[3/7] Compressing sanitized blockchain..."
   # Use sudo because files are owned by root (extracted from container)
   sudo tar czf "$blockchain_export_dir/blockchain-data.tar.gz" -C "$temp_blockchain" . 2>/dev/null || {
     # Clean up if tar fails
@@ -7926,7 +8427,7 @@ export_base_container(){
   echo "    ✓ Blockchain compressed ($blockchain_size)"
   
   echo ""
-  echo "[4/6] Splitting blockchain for GitHub (1.9GB parts)..."
+  echo "[4/7] Splitting blockchain for GitHub (1.9GB parts)..."
   cd "$blockchain_export_dir"
   split -b 1900M -d -a 2 "blockchain-data.tar.gz" "blockchain.tar.gz.part"
   
@@ -7951,7 +8452,7 @@ export_base_container(){
   echo "    ✓ Split into $part_count parts"
   
   echo ""
-  echo "[5/6] Creating manifest..."
+  echo "[5/7] Creating manifest..."
   
   # Create manifest
   cat > MANIFEST.txt << EOF
@@ -8002,6 +8503,65 @@ EOF
   
   echo "    ✓ Blockchain export complete (sanitized)"
   
+  # Step 2.5: Export binaries if node type is Garbageman or Knots
+  # Note: node_type was already detected in Step 1 when we queried blockchain height
+  echo ""
+  echo "[6/7] Checking if blockchain export includes binary-compatible data..."
+  echo "    ✓ Blockchain data export complete"
+  
+  echo ""
+  echo "[7/7] Exporting binaries (if applicable)..."
+  echo "    Node type: ${node_type:-Unknown}"
+  
+  # Export binaries with type-specific suffixes for node selection during import
+  # Suffixes: -gm (Garbageman/Libre Relay), -knots (Bitcoin Knots)
+  # Import functions will detect available binaries and offer selection menu
+  if [[ "$node_type" == "Libre Relay/Garbageman" ]] || [[ "$node_type" == "Bitcoin Knots" ]]; then
+    echo "    Extracting binaries from container..."
+    
+    # Determine binary suffix based on node type
+    local binary_suffix=""
+    if [[ "$node_type" == "Libre Relay/Garbageman" ]]; then
+      binary_suffix="-gm"
+    elif [[ "$node_type" == "Bitcoin Knots" ]]; then
+      binary_suffix="-knots"
+    fi
+    
+    # Extract bitcoind and bitcoin-cli from container
+    # Container must be running to use 'container cp' command
+    local need_to_stop=false
+    if [[ "$(container_state "$CONTAINER_NAME")" != "up" ]]; then
+      echo "    Starting container temporarily to extract binaries..."
+      container_cmd start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+      sleep 3
+      need_to_stop=true
+    fi
+    
+    # Copy binaries from container to export directory
+    if container_cmd cp "$CONTAINER_NAME:/usr/local/bin/bitcoind" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null && \
+       container_cmd cp "$CONTAINER_NAME:/usr/local/bin/bitcoin-cli" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null; then
+      
+      # Fix ownership (container cp may create root-owned files)
+      sudo chown "$USER:$USER" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null || true
+      
+      # Generate checksums for binaries
+      (cd "$export_dir" && sha256sum "bitcoind${binary_suffix}" "bitcoin-cli${binary_suffix}" >> SHA256SUMS.binaries)
+      echo "    ✓ Binaries exported as: bitcoind${binary_suffix}, bitcoin-cli${binary_suffix}"
+      echo "    ✓ Binary checksums saved to SHA256SUMS.binaries"
+    else
+      echo "    ⚠️  Warning: Failed to extract binaries from container"
+    fi
+    
+    # Stop container if we started it just for binary extraction
+    if [[ "$need_to_stop" == "true" ]]; then
+      echo "    Stopping container..."
+      ensure_container_stopped "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+  else
+    echo "    Node type is not Garbageman or Knots - skipping binary export"
+  fi
+  
   # Step 3: Export container image
   echo ""
   echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -8041,10 +8601,10 @@ Contents:
 
 What's Included:
 ----------------
-- Alpine Linux base
-- Bitcoin Garbageman (compiled)
-- Tor for hidden service
-- Configured bitcoind service
+- Alpine Linux base (~500MB)
+- Bitcoin node binaries (Garbageman and/or Bitcoin Knots)
+- Tor for hidden service (.onion address)
+- Configured entrypoint script with proper Tor setup
 
 What's NOT Included:
 --------------------
@@ -8055,6 +8615,7 @@ Blockchain Data:
 ----------------
 The blockchain data is included in this export folder as split parts:
   blockchain.tar.gz.part01, part02, etc.
+These are recombined automatically during import.
 
 Import Instructions:
 ====================
@@ -8064,8 +8625,9 @@ Method 1 (Recommended): Use garbageman-nm.sh
   
   The script will automatically:
   1. Import the container image
-  2. Reassemble and import blockchain data
-  3. Combine them into a complete working container
+  2. Let you select node type (if both Garbageman and Knots binaries present)
+  3. Reassemble and import blockchain data
+  4. Create container with bridge networking (isolated network namespace)
 
 Method 2 (Manual - Docker):
   1. Load image: docker load -i container-image.tar
@@ -8077,7 +8639,13 @@ Method 2 (Manual - Docker):
      docker run --rm -v garbageman-data:/data -v $(pwd):/import:ro \
        alpine cp -a /import/* /data/
   5. Create container:
-     docker create --name gm-base --network host \
+     # For clearnet mode (accepts incoming clearnet connections):
+     docker create --name gm-base -p 8333:8333 \
+       -v garbageman-data:/var/lib/bitcoin \
+       garbageman:latest
+     
+     # For Tor-only mode (Tor-only connections):
+     docker create --name gm-base \
        -v garbageman-data:/var/lib/bitcoin \
        garbageman:latest
 
@@ -8153,7 +8721,17 @@ METADATA
   
   # Generate combined checksums for all files
   echo "    Generating checksums..."
+  
+  # Start with blockchain parts and container image
   (cd "$export_dir" && sha256sum blockchain.tar.gz.part* "${image_archive_name}" > SHA256SUMS)
+  
+  # Add binaries if they exist
+  if [[ -f "$export_dir/SHA256SUMS.binaries" ]]; then
+    echo "" >> "$export_dir/SHA256SUMS"
+    echo "# Bitcoin binaries:" >> "$export_dir/SHA256SUMS"
+    cat "$export_dir/SHA256SUMS.binaries" >> "$export_dir/SHA256SUMS"
+    rm -f "$export_dir/SHA256SUMS.binaries"  # Clean up temporary file
+  fi
   
   # Add reassembled blockchain checksum
   echo "" >> "$export_dir/SHA256SUMS"
@@ -8207,6 +8785,7 @@ METADATA
 # Supported inputs:
 #   - Unified export folder: gm-export-YYYYMMDD-HHMMSS/
 #     • Contains container image archive (container-image.tar.gz) plus blockchain parts (blockchain.tar.gz.partN)
+#     • Contains node binaries (bitcoind-gm/bitcoin-cli-gm or bitcoind-knots/bitcoin-cli-knots)
 #     • If only a VM image is found, user is guided to the VM import
 # Process:
 #   1. Let user configure defaults (reserves, container sizes, clearnet toggle)
@@ -8215,11 +8794,15 @@ METADATA
 #   4. Prefer container image; if missing but VM image present, show helpful guidance
 #   5. Verify checksums (SHA256SUMS)
 #   6. Load container image (docker/podman load)
-#   7. Create volume and inject blockchain if parts are present
+#   7. Let user select node type (Garbageman or Bitcoin Knots) based on available binaries
 #   8. Create container with proper configuration
+#   9. Inject selected node binaries into container using container_cmd cp
+#  10. Create volume and inject blockchain if parts are present
+#  11. Inject bitcoin.conf based on clearnet setting
 # Notes:
 #   - Folder detection is flexible: either image type triggers listing in menu
 #   - Cross-guidance helps users pick the correct import path (container vs VM)
+#   - Node selection: Auto-selects if only one type available, presents menu if both
 # Recommendation: Use "Import from GitHub" for complete automated download/verify/import
 import_base_container(){
   # Let user configure defaults for resource allocation
@@ -8347,6 +8930,63 @@ import_base_container(){
   fi
   echo "    ✓ Image loaded"
   
+  # Check for binary files and let user select node type
+  echo ""
+  echo "Checking available node implementations..."
+  
+  local has_gm=false
+  local has_knots=false
+  local node_choice
+  local binary_suffix
+  
+  if [[ -f "$extract_dir/bitcoind-gm" ]] && [[ -f "$extract_dir/bitcoin-cli-gm" ]]; then
+    has_gm=true
+    echo "  ✓ Found Garbageman binaries"
+  fi
+  
+  if [[ -f "$extract_dir/bitcoind-knots" ]] && [[ -f "$extract_dir/bitcoin-cli-knots" ]]; then
+    has_knots=true
+    echo "  ✓ Found Bitcoin Knots binaries"
+  fi
+  
+  if [[ "$has_gm" == "false" ]] && [[ "$has_knots" == "false" ]]; then
+    pause "❌ No node binaries found in export!\n\nExpected: bitcoind-gm + bitcoin-cli-gm OR bitcoind-knots + bitcoin-cli-knots\n\nThis export may be from an older version.\nPlease re-export or download a newer release."
+    return
+  fi
+  
+  # Build menu based on available binaries
+  local menu_opts=()
+  if [[ "$has_gm" == "true" ]]; then
+    menu_opts+=("1" "Garbageman")
+  fi
+  if [[ "$has_knots" == "true" ]]; then
+    menu_opts+=("2" "Bitcoin Knots")
+  fi
+  
+  if [[ "$has_gm" == "true" ]] && [[ "$has_knots" == "true" ]]; then
+    # Both available, let user choose
+    node_choice=$(whiptail --title "Select Node Type" --menu \
+      "Choose which Bitcoin implementation to install:\n\nBoth are available in this export." 15 70 2 \
+      "${menu_opts[@]}" \
+      3>&1 1>&2 2>&3) || {
+        echo "Cancelled."
+        return
+      }
+  else
+    # Only one available, auto-select it
+    node_choice="${menu_opts[0]}"
+    echo "  ℹ Only one implementation available, auto-selecting: ${menu_opts[1]}"
+  fi
+  
+  # Set binary suffix based on selection
+  if [[ "$node_choice" == "1" ]]; then
+    binary_suffix="-gm"
+    echo "Selected: Garbageman (Libre Relay)"
+  elif [[ "$node_choice" == "2" ]]; then
+    binary_suffix="-knots"
+    echo "Selected: Bitcoin Knots"
+  fi
+  
   # Create data volume and import data
   echo ""
   echo "[3/5] Importing blockchain data..."
@@ -8397,16 +9037,26 @@ import_base_container(){
     fi
   fi
   
-  # Create container
+  # Create container with bridge networking (not host networking)
+  # Each container gets its own isolated network namespace
+  # For CLEARNET_OK=yes: Expose port 8333 to allow incoming clearnet connections (user can set up port forwarding)
+  # For Tor-only: No port exposure needed - Tor handles incoming via hidden service
   echo ""
   echo "[4/5] Creating container..."
   
   # Container will use CLEARNET_OK setting for bitcoind configuration
   echo "    Configuring for CLEARNET_OK=${CLEARNET_OK}"
   
+  # Determine if we should expose P2P port (only for clearnet mode on base container)
+  local port_args=""
+  if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+    port_args="-p 8333:8333"
+    echo "    Exposing port 8333 for incoming clearnet connections"
+  fi
+  
   if ! container_cmd create \
     --name "$CONTAINER_NAME" \
-    --network host \
+    $port_args \
     --cpus="$SYNC_VCPUS" \
     --memory="${SYNC_RAM_MB}m" \
     --memory-swap="${SYNC_RAM_MB}m" \
@@ -8416,6 +9066,27 @@ import_base_container(){
     die "Failed to create container"
   fi
   echo "    ✓ Container created"
+  
+  # Inject selected node binaries into container
+  echo ""
+  echo "[4b/5] Injecting node binaries into container..."
+  
+  local bitcoind_file="$extract_dir/bitcoind${binary_suffix}"
+  local bitcoin_cli_file="$extract_dir/bitcoin-cli${binary_suffix}"
+  
+  # Copy binaries into the container
+  if ! container_cmd cp "$bitcoind_file" "${CONTAINER_NAME}:/usr/local/bin/bitcoind"; then
+    die "Failed to copy bitcoind to container"
+  fi
+  
+  if ! container_cmd cp "$bitcoin_cli_file" "${CONTAINER_NAME}:/usr/local/bin/bitcoin-cli"; then
+    die "Failed to copy bitcoin-cli to container"
+  fi
+  
+  # Set executable permissions on binaries
+  container_cmd exec "$CONTAINER_NAME" chmod 755 /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli >/dev/null 2>&1 || true
+  
+  echo "    ✓ Binaries injected"
   
   # Inject bitcoin.conf into the volume based on CLEARNET_OK setting
   echo ""
@@ -8468,11 +9139,21 @@ torcontrol=127.0.0.1:9051
     sh -c 'cp /bitcoin.conf /data/bitcoin.conf && chmod 644 /data/bitcoin.conf' 2>/dev/null; then
     echo "    ✓ bitcoin.conf injected into volume"
     
-    # Update the container to use the config from the volume
+    # Recreate container with volume-based config override
+    # Port 8333 exposed only if CLEARNET_OK=yes (allows incoming clearnet with port forwarding)
+    # Clones never expose ports (Tor-only, would conflict)
     container_cmd rm "$CONTAINER_NAME" >/dev/null 2>&1
+    
+    # Determine if we should expose P2P port (only for clearnet mode on base container)
+    local port_args=""
+    if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+      port_args="-p 8333:8333"
+      echo "    Exposing port 8333 for incoming clearnet connections"
+    fi
+    
     if ! container_cmd create \
       --name "$CONTAINER_NAME" \
-      --network host \
+      $port_args \
       --cpus="$SYNC_VCPUS" \
       --memory="${SYNC_RAM_MB}m" \
       --memory-swap="${SYNC_RAM_MB}m" \
@@ -8482,9 +9163,16 @@ torcontrol=127.0.0.1:9051
       bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin; then
       # Fallback: recreate without custom command
       echo "    ⚠️  Failed to override config, using default from image"
+      
+      # Re-determine port args for fallback
+      local port_args=""
+      if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+        port_args="-p 8333:8333"
+      fi
+      
       container_cmd create \
         --name "$CONTAINER_NAME" \
-        --network host \
+        $port_args \
         --cpus="$SYNC_VCPUS" \
         --memory="${SYNC_RAM_MB}m" \
         --memory-swap="${SYNC_RAM_MB}m" \
@@ -8504,7 +9192,8 @@ torcontrol=127.0.0.1:9051
   echo ""
   echo "✅ Import complete!"
   echo ""
-  pause "Container '$CONTAINER_NAME' imported successfully!\n\nUse 'Monitor Base Container Sync' to check status."
+  local node_type="$([ "$binary_suffix" == "-gm" ] && echo "Garbageman" || echo "Bitcoin Knots")"
+  pause "Container '$CONTAINER_NAME' imported successfully with $node_type!\n\nUse 'Monitor Base Container Sync' to check status."
 }
 
 # import_from_github_container: Import container from GitHub release (NEW MODULAR FORMAT)
@@ -8512,6 +9201,7 @@ torcontrol=127.0.0.1:9051
 # Modular Design:
 #   - Downloads blockchain data separately from images
 #   - Downloads BOTH images (container + VM) for flexibility/switching later
+#   - Downloads node binaries (Garbageman and/or Bitcoin Knots)
 #   - Verifies checksums (unified SHA256SUMS when available)
 #   - Reassembles blockchain from split parts
 #   - Uses container image for import; keeps VM image for later use
@@ -8519,23 +9209,29 @@ torcontrol=127.0.0.1:9051
 #   1. Let user configure defaults (reserves, container sizes, clearnet toggle)
 #   2. Fetch available releases from GitHub API
 #   3. Let user select a release tag
-#   4. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
-#   5. Download container image (container-image.tar.gz)
-#   6. Download VM image (vm-image.tar.gz)
-#   7. Verify checksums for parts and images (prefer SHA256SUMS)
-#   8. Reassemble blockchain from parts
-#   9. Load container image with docker/podman load
-#  10. Create data volume (garbageman-data)
-#  11. Extract and inject blockchain data into volume
-#  12. Create base container with proper configuration
-#  13. Cleanup temporary files (keep original downloads)
+#   4. Parse release assets: blockchain parts, images, binaries, checksums
+#   5. Let user select node type (Garbageman or Bitcoin Knots) based on available binaries
+#   6. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
+#   7. Download container image (container-image.tar.gz)
+#   8. Download VM image (vm-image.tar.gz) - optional
+#   9. Download selected node binaries (bitcoind-gm/knots, bitcoin-cli-gm/knots)
+#  10. Verify checksums for parts and images (prefer SHA256SUMS)
+#  11. Reassemble blockchain from parts
+#  12. Load container image with docker/podman load
+#  13. Create data volume (garbageman-data)
+#  14. Extract and inject blockchain data into volume
+#  15. Inject selected node binaries into temporary container using container_cmd cp
+#  16. Create base container with proper configuration
+#  17. Inject bitcoin.conf based on clearnet setting
+#  18. Cleanup temporary files (keep original downloads)
 # Prerequisites: docker or podman, curl or wget, jq
-# Download Size: ~21GB (blockchain) + ~0.5GB (container) + ~1GB (VM) ≈ ~22.5GB total
+# Download Size: ~21GB (blockchain) + ~0.5GB (container) + ~1GB (VM) + ~0.1GB (binaries) ≈ ~22.6GB total
 # Benefits over old format:
 #   - Blockchain is separate (can be shared between VM and container)
 #   - Much smaller per-image downloads (~0.5GB container, ~1GB VM)
 #   - Can switch between VM and container without re-downloading blockchain
 #   - Downloaded files preserved for USB transfer to other computers
+#   - User choice between Garbageman (Libre Relay) and Bitcoin Knots
 # Side effects: Downloads to ~/Downloads/gm-export-*, imports complete container with volume
 import_from_github_container(){
   local repo="paulscode/garbageman-nm"
@@ -8633,7 +9329,7 @@ import_from_github_container(){
   local release_assets
   release_assets=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$selected_tag\") | .assets")
   
-  # Find blockchain parts, container image, VM image, and checksums
+  # Find blockchain parts, container image, VM image, checksums, and binaries
   local blockchain_part_urls=()
   local blockchain_part_names=()
   local container_image_url=""
@@ -8641,6 +9337,10 @@ import_from_github_container(){
   local vm_image_url=""
   local vm_image_name=""
   local sha256sums_url=""
+  local bitcoind_gm_url=""
+  local bitcoin_cli_gm_url=""
+  local bitcoind_knots_url=""
+  local bitcoin_cli_knots_url=""
   
   while IFS='|' read -r name url; do
     [[ -z "$name" ]] && continue
@@ -8659,6 +9359,15 @@ import_from_github_container(){
     elif [[ "$name" == "vm-image.tar.gz" ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
+    # Bitcoin binaries
+    elif [[ "$name" == "bitcoind-gm" ]]; then
+      bitcoind_gm_url="$url"
+    elif [[ "$name" == "bitcoin-cli-gm" ]]; then
+      bitcoin_cli_gm_url="$url"
+    elif [[ "$name" == "bitcoind-knots" ]]; then
+      bitcoind_knots_url="$url"
+    elif [[ "$name" == "bitcoin-cli-knots" ]]; then
+      bitcoin_cli_knots_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
   
@@ -8680,10 +9389,74 @@ import_from_github_container(){
     echo ""
   fi
   
-  # Calculate approximate download sizes
+  # Check for binary files and let user select node type
+  echo ""
+  echo "Checking available node implementations..."
+  
+  local has_gm=false
+  local has_knots=false
+  local node_choice
+  local binary_suffix
+  
+  if [[ -n "$bitcoind_gm_url" ]] && [[ -n "$bitcoin_cli_gm_url" ]]; then
+    has_gm=true
+    echo "  ✓ Found Garbageman binaries"
+  fi
+  
+  if [[ -n "$bitcoind_knots_url" ]] && [[ -n "$bitcoin_cli_knots_url" ]]; then
+    has_knots=true
+    echo "  ✓ Found Bitcoin Knots binaries"
+  fi
+  
+  if [[ "$has_gm" == "false" ]] && [[ "$has_knots" == "false" ]]; then
+    pause "❌ No node binaries found in release!\n\nThis release may be from an older version.\nPlease choose a newer release or re-export."
+    return
+  fi
+  
+  # Build menu based on available binaries
+  local menu_opts=()
+  if [[ "$has_gm" == "true" ]]; then
+    menu_opts+=("1" "Garbageman")
+  fi
+  if [[ "$has_knots" == "true" ]]; then
+    menu_opts+=("2" "Bitcoin Knots")
+  fi
+  
+  if [[ "$has_gm" == "true" ]] && [[ "$has_knots" == "true" ]]; then
+    # Both available, let user choose
+    node_choice=$(whiptail --title "Select Node Type" --menu \
+      "Choose which Bitcoin implementation to install:\n\nBoth are available in this release." 15 70 2 \
+      "${menu_opts[@]}" \
+      3>&1 1>&2 2>&3) || {
+        echo "Cancelled."
+        return
+      }
+  else
+    # Only one available, auto-select it
+    node_choice="${menu_opts[0]}"
+    echo "  ℹ Only one implementation available, auto-selecting: ${menu_opts[1]}"
+  fi
+  
+  # Set binary suffix and URLs based on selection
+  local bitcoind_url=""
+  local bitcoin_cli_url=""
+  if [[ "$node_choice" == "1" ]]; then
+    binary_suffix="-gm"
+    bitcoind_url="$bitcoind_gm_url"
+    bitcoin_cli_url="$bitcoin_cli_gm_url"
+    echo "Selected: Garbageman (Libre Relay)"
+  elif [[ "$node_choice" == "2" ]]; then
+    binary_suffix="-knots"
+    bitcoind_url="$bitcoind_knots_url"
+    bitcoin_cli_url="$bitcoin_cli_knots_url"
+    echo "Selected: Bitcoin Knots"
+  fi
+  
+  # Calculate approximate download sizes (including binaries)
   local blockchain_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 )) GB"  # parts are ~1.9GB each
   local container_size="~500 MB"
   local vm_size="~1 GB"
+  local binaries_size="~100 MB"
   local total_size="~$(( ${#blockchain_part_urls[@]} * 19 / 10 + 2 )) GB"  # +2GB for both images
   
   echo "Download plan:"
@@ -8814,6 +9587,46 @@ import_from_github_container(){
     fi
     
   fi
+  
+  # Step 2c: Download selected node binaries
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 2c: Downloading Node Binaries"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  local bitcoind_filename="bitcoind${binary_suffix}"
+  local bitcoin_cli_filename="bitcoin-cli${binary_suffix}"
+  
+  echo "Downloading $bitcoind_filename..."
+  if [[ "$download_tool" == "curl" ]]; then
+    curl -L --progress-bar -o "$download_dir/$bitcoind_filename" "$bitcoind_url" || {
+      pause "❌ Failed to download bitcoind binary"
+      return
+    }
+  else
+    wget --show-progress -O "$download_dir/$bitcoind_filename" "$bitcoind_url" || {
+      pause "❌ Failed to download bitcoind binary"
+      return
+    }
+  fi
+  
+  echo "Downloading $bitcoin_cli_filename..."
+  if [[ "$download_tool" == "curl" ]]; then
+    curl -L --progress-bar -o "$download_dir/$bitcoin_cli_filename" "$bitcoin_cli_url" || {
+      pause "❌ Failed to download bitcoin-cli binary"
+      return
+    }
+  else
+    wget --show-progress -O "$download_dir/$bitcoin_cli_filename" "$bitcoin_cli_url" || {
+      pause "❌ Failed to download bitcoin-cli binary"
+      return
+    }
+  fi
+  
+  # Mark binaries as executable
+  chmod +x "$download_dir/$bitcoind_filename"
+  chmod +x "$download_dir/$bitcoin_cli_filename"
   
   # Step 3: Verify blockchain parts
   echo ""
@@ -9014,6 +9827,40 @@ import_from_github_container(){
   
   echo "    ✓ Blockchain injected"
   
+  # Step 6b: Inject selected node binaries into temporary container
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo "Step 6b: Injecting Node Binaries"
+  echo "═══════════════════════════════════════════════════════════════════════════════"
+  echo ""
+  
+  echo "Creating temporary container for binary injection..."
+  local temp_container_name="gm-temp-$$"
+  
+  # Create a temporary container
+  if ! container_cmd create --name "$temp_container_name" \
+    -v garbageman-data:/var/lib/bitcoin \
+    "$image_name" >/dev/null 2>&1; then
+    echo "    ⚠ Failed to create temporary container, will try to inject binaries later"
+  else
+    # Copy binaries into the temporary container
+    if container_cmd cp "$download_dir/$bitcoind_filename" "${temp_container_name}:/usr/local/bin/bitcoind" && \
+       container_cmd cp "$download_dir/$bitcoin_cli_filename" "${temp_container_name}:/usr/local/bin/bitcoin-cli"; then
+      
+      # Set executable permissions
+      container_cmd start "$temp_container_name" >/dev/null 2>&1
+      container_cmd exec "$temp_container_name" chmod 755 /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli >/dev/null 2>&1 || true
+      container_cmd stop "$temp_container_name" >/dev/null 2>&1
+      
+      echo "    ✓ Binaries injected and marked executable"
+    else
+      echo "    ⚠ Failed to inject binaries"
+    fi
+    
+    # Remove temporary container
+    container_cmd rm "$temp_container_name" >/dev/null 2>&1
+  fi
+  
   # Step 7: Create base container
   echo ""
   echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -9071,12 +9918,21 @@ torcontrol=127.0.0.1:9051
     sh -c 'cp /bitcoin.conf /data/bitcoin.conf && chmod 644 /data/bitcoin.conf' 2>/dev/null; then
     echo "    ✓ bitcoin.conf injected successfully"
     
-    # Create container with custom command to use the injected config
+    # Create container with bridge networking (isolated network namespace)
+    # Port 8333 exposed only if CLEARNET_OK=yes (allows incoming clearnet with port forwarding)
     echo ""
     echo "Creating container '$CONTAINER_NAME' with custom configuration..."
+    
+    # Determine if we should expose P2P port (only for clearnet mode on base container)
+    local port_args=""
+    if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+      port_args="-p 8333:8333"
+      echo "    Exposing port 8333 for incoming clearnet connections"
+    fi
+    
     container_cmd create \
       --name "$CONTAINER_NAME" \
-      --network host \
+      $port_args \
       -v garbageman-data:/var/lib/bitcoin \
       --memory="${SYNC_RAM_MB}m" \
       --memory-swap="${SYNC_RAM_MB}m" \
@@ -9085,9 +9941,16 @@ torcontrol=127.0.0.1:9051
       bitcoind -conf=/var/lib/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin || {
       # Fallback: create without custom command
       echo "    ⚠️  Failed to create with custom config, using default"
+      
+      # Re-determine port args for fallback
+      local port_args=""
+      if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+        port_args="-p 8333:8333"
+      fi
+      
       container_cmd create \
         --name "$CONTAINER_NAME" \
-        --network host \
+        $port_args \
         -v garbageman-data:/var/lib/bitcoin \
         --memory="${SYNC_RAM_MB}m" \
         --memory-swap="${SYNC_RAM_MB}m" \
@@ -9101,9 +9964,16 @@ torcontrol=127.0.0.1:9051
     echo "    ✓ Container configured to use custom bitcoin.conf"
   else
     echo "    ⚠️  Warning: Failed to inject config, creating with default from image"
+    
+    # Determine if we should expose P2P port
+    local port_args=""
+    if [[ "${CLEARNET_OK,,}" == "yes" ]]; then
+      port_args="-p 8333:8333"
+    fi
+    
     container_cmd create \
       --name "$CONTAINER_NAME" \
-      --network host \
+      $port_args \
       -v garbageman-data:/var/lib/bitcoin \
       --memory="${SYNC_RAM_MB}m" \
       --memory-swap="${SYNC_RAM_MB}m" \
@@ -9125,7 +9995,7 @@ torcontrol=127.0.0.1:9051
   echo "╚════════════════════════════════════════════════════════════════════════════════╝"
   echo ""
   echo "The base container '$CONTAINER_NAME' has been created with:"
-  echo "  • Container image (Alpine Linux + Garbageman)"
+  echo "  • Container image (Alpine Linux + $([ "$binary_suffix" == "-gm" ] && echo "Garbageman" || echo "Bitcoin Knots"))"
   echo "  • Complete blockchain data in volume 'garbageman-data'"
   if [[ -n "$vm_image_url" ]] && [[ -f "$download_dir/$vm_image_name" ]]; then
     echo "  • VM image (downloaded for later use)"
