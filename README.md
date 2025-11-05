@@ -322,14 +322,13 @@ Choose **"Create Base Container/VM"** from the menu. You have three options:
 6. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
 
 **Option 2: Import from File** (for transferring between your own machines)
-1. Select an export archive from `~/Downloads/`
-2. Supports both old monolithic format and new modular format:
-   - **Modular:** Separate blockchain + container/VM image (recommended)
-   - **Old format:** Single large archive (still supported)
-3. Verify checksums automatically
+1. Select a unified export folder from `~/Downloads/`
+2. Supports unified modular format:
+   - **Unified format:** Separate blockchain + container/VM image in single folder
+3. Verify checksums automatically via SHA256SUMS
 4. Import the pre-synced blockchain and image
 5. Ready in minutes instead of days!
-6. Works for both VMs and containers (separate export formats)
+6. Works for both VMs and containers
 
 **Option 3: Build from Scratch** (2+ hours compile, 24-28 hours sync)
 1. Build Docker image (Containers) or download Alpine Linux base (VMs)
@@ -370,6 +369,7 @@ Choose **"Monitor Base Sync"** from the menu. This will:
    ║    IP:   192.168.122.44                                                        ║
    ║                                                                                ║
    ║  Bitcoin Sync Status:                                                          ║
+   ║    Node Type: Libre Relay/Garbageman                                           ║
    ║    Blocks:   529668 / 921108                                                   ║
    ║    Progress: 26% (0.255699756115667)                                           ║
    ║    IBD:      true                                                              ║
@@ -395,6 +395,7 @@ Choose **"Monitor Base Sync"** from the menu. This will:
    ║    Image: garbageman:latest                                                    ║
    ║                                                                                ║
    ║  Bitcoin Sync Status:                                                          ║
+   ║    Node Type: Libre Relay/Garbageman                                           ║
    ║    Blocks:   529668 / 921108                                                   ║
    ║    Progress: 26% (0.255699756115667)                                           ║
    ║    IBD:      true                                                              ║
@@ -665,23 +666,25 @@ Yes! Use the built-in modular export feature:
 
 1. **Export from source machine:**
    - Choose **Option 3: Manage Base** → **Export VM/Container (for transfer)**
-   - Creates modular export with TWO components:
-     - **Blockchain data:** `~/Downloads/gm-blockchain-YYYYMMDD-HHMMSS/` (split into 1.9GB parts)
-     - **Container/VM image:** `gm-container-image-*.tar.gz`  or `~/Downloads/gm-vm-image-*.tar.gz` (~500MB-1GB)
+   - Creates unified export folder: `~/Downloads/gm-export-YYYYMMDD-HHMMSS/`
+   - Contains all components:
+     - **Blockchain data:** Split into 1.9GB parts (`blockchain.tar.gz.part01`, `part02`, etc.)
+     - **Container/VM image:** `container-image.tar.gz` or `vm-image.tar.gz` (~500MB-1GB)
+     - **Checksums:** `SHA256SUMS` (unified checksums for all files)
+     - **Documentation:** `MANIFEST.txt` (assembly instructions)
    - All sensitive data removed (Tor keys, SSH keys, peer databases, logs)
    - All files SHA256 checksummed for integrity verification
-   - Timestamp-linked for easy reassembly
 
 2. **Transfer to destination machine:**
-   - Copy blockchain directory and image archive to `~/Downloads/`
+   - Copy entire export folder to `~/Downloads/`
    - All checksums are included automatically
 
 3. **Import on destination machine:**
    - Choose **Option 1: Create Base Container/VM** → **"Import from file"**
    - Script will:
-     - Scan `~/Downloads/` for export archives
-     - Detect modular format (or old monolithic format - both supported)
-     - Verify all SHA256 checksums automatically
+     - Scan `~/Downloads/` for export folders
+     - Detect unified modular format
+     - Verify all SHA256 checksums automatically via SHA256SUMS
      - Reassemble blockchain if needed
      - Extract and import the image
      - Combine blockchain with container/VM
@@ -694,10 +697,6 @@ Yes! Use the built-in modular export feature:
 - Blockchain can be reused across multiple exports
 - Can update container/VM without re-transferring blockchain
 - All parts under 2GB (GitHub release compatible)
-
-**Backward compatibility:**
-- Old monolithic exports (`gm-base-export-*.tar.gz`) still work
-- Import system auto-detects format
 
 **Creating GitHub Releases (for maintainers/contributors):**
 
@@ -724,12 +723,11 @@ If you want to share your synced base container/VM as a GitHub release:
    - Click "Draft a new release"
    - Select your tag
    - Upload all files from the export directory:
-     - All `gm-blockchain.tar.gz.part*` files (shared between container and VM)
-     - `gm-blockchain.tar.gz.sha256` and `MANIFEST.txt`
-     - `gm-vm-image-*.tar.gz` and checksum (if VM release)
-     - `gm-container-image-*.tar.gz` and checksum (if container release)
-     - `RELEASE-MANIFEST.txt`
-   - Add release notes with blockchain height, date, and modular format benefits
+     - All `blockchain.tar.gz.part*` files (shared between container and VM)
+     - `SHA256SUMS` (unified checksums) and `MANIFEST.txt`
+     - `vm-image.tar.gz` (if VM release)
+     - `container-image.tar.gz` (if container release)
+   - Add release notes with blockchain height, date, and unified format benefits
    - Publish!
 
 4. **Users can then import via:**

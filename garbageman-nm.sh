@@ -1304,7 +1304,7 @@ build_garbageman_in_vm(){
   echo "Expected completion: $(date -d '+2 hours' '+%H:%M:%S') (approximate)"
   echo ""
   
-  # Debug: Check sudo keepalive status
+  # Check if sudo keepalive is still running (prevents password prompts during long operations)
   if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
     if kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
       echo "✓ Sudo keepalive running (PID: $SUDO_KEEPALIVE_PID)"
@@ -2310,20 +2310,18 @@ Available for initial sync: ${AVAIL_CORES} cores, ${AVAIL_RAM_MB} MiB"
 # Import Base VM
 ################################################################################
 
-# import_base_vm: Import base VM from exported archive (supports old & new formats)
+# import_base_vm: Import base VM from exported folder (unified format only)
 # Purpose: Alternative to building from scratch - imports sanitized export
 # Supported inputs:
-#   - NEW unified export folder: gm-export-YYYYMMDD-HHMMSS/
-#     • May contain VM and/or container image archives plus blockchain parts
-#     • This function uses the VM image; if only a container image is found, user is guided to the container import
-#   - OLD monolithic archive: gm-base-export-YYYYMMDD-HHMMSS.tar.gz (VM + blockchain)
-#   - OLD modular VM image:   gm-vm-image-YYYYMMDD-HHMMSS.tar.gz (VM only)
-# Flow (new unified folder):
+#   - Unified export folder: gm-export-YYYYMMDD-HHMMSS/
+#     • Contains VM image archive (vm-image.tar.gz) plus blockchain parts (blockchain.tar.gz.partN)
+#     • If only a container image is found, user is guided to the container import
+# Flow:
 #   1. Let user configure defaults (reserves, VM sizes, clearnet toggle)
 #   2. Scan ~/Downloads for gm-export-* folders
 #   3. Let user select which export to import
 #   4. Prefer VM image; if missing but container image present, show helpful guidance
-#   5. Verify checksums (SHA256SUMS or per-file .sha256)
+#   5. Verify checksums (SHA256SUMS)
 #   6. Extract VM archive, detect expected files (vm-disk.qcow2, *.xml)
 #   7. If blockchain parts present, reassemble/extract and inject into VM disk
 #   8. Copy disk image to /var/lib/libvirt/images/ and define VM
@@ -2345,25 +2343,18 @@ import_base_vm(){
   echo "Scanning ~/Downloads for VM exports..."
   local export_items=()
   
-  # Look for NEW unified export folders (gm-export-*)
+  # Look for unified export folders (gm-export-*)
   while IFS= read -r -d '' folder; do
     # Check if it contains a VM image archive OR container image archive
     # This allows importing from folders that have either or both image types
-    if ls "$folder"/gm-vm-image-*.tar.gz >/dev/null 2>&1 || \
-       ls "$folder"/vm-image-*.tar.gz >/dev/null 2>&1 || \
-       ls "$folder"/container-image-*.tar.gz >/dev/null 2>&1 || \
-       ls "$folder"/gm-container-image-*.tar.gz >/dev/null 2>&1; then
+    if ls "$folder"/vm-image.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/container-image.tar.gz >/dev/null 2>&1; then
       export_items+=("folder:$folder")
     fi
   done < <(find "$HOME/Downloads" -maxdepth 1 -type d -name "gm-export-*" -print0 2>/dev/null | sort -z)
   
-  # Look for OLD format archives (.tar.gz files)
-  while IFS= read -r -d '' archive; do
-    export_items+=("file:$archive")
-  done < <(find "$HOME/Downloads" -maxdepth 1 -type f \( -name "gm-base-export-*.tar.gz" -o -name "gm-vm-image-*.tar.gz" \) -print0 2>/dev/null | sort -z)
-  
   if [[ ${#export_items[@]} -eq 0 ]]; then
-    pause "No VM exports found in ~/Downloads.\n\nLooking for:\n  gm-export-* folders with VM or container images\n  gm-base-export-*.tar.gz (old format)\n  gm-vm-image-*.tar.gz (old modular format)"
+    pause "No VM exports found in ~/Downloads.\n\nLooking for:\n  gm-export-* folders with vm-image.tar.gz files"
     return
   fi
   
@@ -2378,32 +2369,17 @@ import_base_vm(){
     local basename=$(basename "$path")
     local display
     
-    if [[ "$type" == "folder" ]]; then
-      local folder_size=$(du -sh "$path" 2>/dev/null | cut -f1)
-      local timestamp=$(echo "$basename" | sed 's/gm-export-\(.*\)/\1/')
-      
-      # Check if blockchain data is present
-      local blockchain_status="blockchain included"
-      if ! ls "$path"/blockchain.tar.gz.part* >/dev/null 2>&1 && \
-         ! ls "$path"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
-        blockchain_status="image only, no blockchain"
-      fi
-      
-      display="${timestamp} (${folder_size}) [${blockchain_status}]"
-    else
-      local file_size=$(du -h "$path" | cut -f1)
-      local timestamp=$(echo "$basename" | sed -E 's/gm-(base-export|vm-image)-(.*)\.tar\.gz/\2/')
-      
-      # Old archives likely have blockchain included (monolithic format)
-      # Modular image-only archives are rare for old format
-      local blockchain_status="blockchain included"
-      if [[ "$basename" =~ vm-image ]]; then
-        blockchain_status="image only, no blockchain"
-      fi
-      
-      display="${timestamp} (${file_size}) [${blockchain_status}]"
+    # All items are now folders (unified format)
+    local folder_size=$(du -sh "$path" 2>/dev/null | cut -f1)
+    local timestamp=$(echo "$basename" | sed 's/gm-export-\(.*\)/\1/')
+    
+    # Check if blockchain data is present
+    local blockchain_status="blockchain included"
+    if ! ls "$path"/blockchain.tar.gz.part* >/dev/null 2>&1; then
+      blockchain_status="image only, no blockchain"
     fi
     
+    display="${timestamp} (${folder_size}) [${blockchain_status}]"
     menu_items+=("$i" "$display")
   done
   
@@ -2423,63 +2399,28 @@ import_base_vm(){
   echo ""
   echo "Selected: $selected_basename"
   
-  # Verify checksum (different handling for folder vs file)
-  if [[ "$item_type" == "folder" ]]; then
-    # NEW format: SHA256SUMS file inside the folder
-    local checksum_file="$item_path/SHA256SUMS"
-    
-    if [[ ! -f "$checksum_file" ]]; then
-      # Try old format with individual .sha256 file
-      local vm_archive=$(ls "$item_path"/vm-image-*.tar.gz 2>/dev/null | head -n1)
-      if [[ -z "$vm_archive" ]]; then
-        vm_archive=$(ls "$item_path"/gm-vm-image-*.tar.gz 2>/dev/null | head -n1)
-      fi
-      local vm_basename=$(basename "$vm_archive")
-      checksum_file="$item_path/${vm_basename}.sha256"
-      
-      if [[ ! -f "$checksum_file" ]]; then
-        pause "❌ Checksum file not found\n\nCannot verify integrity. Import aborted."
-        return
-      fi
-    fi
-    
-    echo "Checksum file found"
-    echo "Verifying SHA256 checksums..."
-    
-    # Verify using SHA256SUMS or individual file
-    if [[ -f "$item_path/SHA256SUMS" ]]; then
-      # Verify VM image archive checksum from SHA256SUMS
-      local vm_archive=$(ls "$item_path"/vm-image-*.tar.gz 2>/dev/null | head -n1)
-      if [[ -z "$vm_archive" ]]; then
-        vm_archive=$(ls "$item_path"/gm-vm-image-*.tar.gz 2>/dev/null | head -n1)
-      fi
-      local vm_basename=$(basename "$vm_archive")
-      
-      if ! (cd "$item_path" && grep "$vm_basename" SHA256SUMS | sha256sum -c 2>&1 | grep -q "OK"); then
-        pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
-        return
-      fi
-    else
-      # Old format with individual checksum file
-      if ! (cd "$item_path" && sha256sum -c "$(basename "$checksum_file")" 2>&1 | grep -q "OK"); then
-        pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
-        return
-      fi
-    fi
-  else
-    # OLD format: checksum is sibling to archive file
-    local checksum_file="${item_path}.sha256"
-    if [[ ! -f "$checksum_file" ]]; then
-      pause "❌ Checksum file not found: ${selected_basename}.sha256\n\nCannot verify integrity. Import aborted."
-      return
-    fi
-    
-    echo "Checksum file found: ${selected_basename}.sha256"
-    echo "Verifying SHA256 checksum..."
-    if ! (cd "$HOME/Downloads" && sha256sum -c "$selected_basename.sha256" 2>&1 | grep -q "OK"); then
-      pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
-      return
-    fi
+  # Verify checksum (unified format - SHA256SUMS file inside the folder)
+  local checksum_file="$item_path/SHA256SUMS"
+  
+  if [[ ! -f "$checksum_file" ]]; then
+    pause "❌ Checksum file not found: SHA256SUMS\n\nCannot verify integrity. Import aborted."
+    return
+  fi
+  
+  echo "Checksum file found"
+  echo "Verifying SHA256 checksums..."
+  
+  # Verify VM image archive checksum from SHA256SUMS
+  local vm_archive=$(ls "$item_path"/vm-image.tar.gz 2>/dev/null | head -n1)
+  if [[ -z "$vm_archive" ]]; then
+    pause "❌ VM image archive not found: vm-image.tar.gz\n\nThis export may only contain a container image."
+    return
+  fi
+  local vm_basename=$(basename "$vm_archive")
+  
+  if ! (cd "$item_path" && grep "$vm_basename" SHA256SUMS | sha256sum -c 2>&1 | grep -q "OK"); then
+    pause "❌ Checksum verification FAILED!\n\nThe archive may be corrupted or tampered with.\n\nImport aborted for security."
+    return
   fi
   
   echo "✅ Checksum verified successfully"
@@ -2505,74 +2446,44 @@ import_base_vm(){
   local extract_dir
   local blockchain_dir
   
-  if [[ "$item_type" == "folder" ]]; then
-    # NEW unified format: use folder directly
-    echo "[1/7] Using unified export folder..."
-    extract_dir="$item_path"
-    
-    # Extract the VM archive within the folder (new or old naming)
-    local vm_archive=$(ls "$extract_dir"/vm-image-*.tar.gz 2>/dev/null | head -n1)
-    if [[ -z "$vm_archive" ]]; then
-      # Try old naming
-      vm_archive=$(ls "$extract_dir"/gm-vm-image-*.tar.gz 2>/dev/null | head -n1)
-    fi
-    
-    if [[ -z "$vm_archive" ]]; then
-      # Check if folder has container image instead
-      if ls "$extract_dir"/container-image-*.tar.gz >/dev/null 2>&1 || ls "$extract_dir"/gm-container-image-*.tar.gz >/dev/null 2>&1; then
-        rm -rf "$temp_extract_dir"
-        pause "❌ This folder only contains a container image.\n\nTo import as a container:\n1. Cancel and return to main menu\n2. Choose 'Create Base Container'\n3. Select 'Import from file'\n4. Choose this same folder\n\nOr download/export a VM image for this release."
-        return
-      else
-        rm -rf "$temp_extract_dir"
-        pause "❌ No VM image archive found in export folder"
-        return
-      fi
-    fi
-    
-    echo "    Extracting VM image archive..."
-    tar -xzf "$vm_archive" -C "$temp_extract_dir" || {
+  # Unified format: use folder directly
+  echo "[1/7] Using unified export folder..."
+  
+  # Extract the VM archive within the folder
+  local vm_archive=$(ls "$item_path"/vm-image.tar.gz 2>/dev/null | head -n1)
+  
+  if [[ -z "$vm_archive" ]]; then
+    # Check if folder has container image instead
+    if ls "$item_path"/container-image.tar.gz >/dev/null 2>&1; then
       rm -rf "$temp_extract_dir"
-      pause "❌ Failed to extract VM image archive"
+      pause "❌ This folder only contains a container image.\n\nTo import as a container:\n1. Cancel and return to main menu\n2. Choose 'Create Base Container'\n3. Select 'Import from file'\n4. Choose this same folder\n\nOr download/export a VM image for this release."
       return
-    }
-    
-    # Blockchain parts are at root level in new format
-    blockchain_dir="$extract_dir"
-    
-    extract_dir="$temp_extract_dir"  # Point to extracted VM files
-    
-  else
-    # OLD format: extract the tar.gz archive
-    echo "[1/7] Extracting archive (this may take a few minutes)..."
-    if ! tar -xzf "$item_path" -C "$temp_extract_dir"; then
+    else
       rm -rf "$temp_extract_dir"
-      pause "❌ Failed to extract archive"
-      return
-    fi
-    
-    # Find the extracted directory 
-    extract_dir=$(find "$temp_extract_dir" -maxdepth 1 -type d \( -name "gm-base-export-*" -o -name "gm-vm-image-*" \) | head -n1)
-    if [[ -z "$extract_dir" ]]; then
-      rm -rf "$temp_extract_dir"
-      pause "❌ Could not find extracted directory in archive"
+      pause "❌ No VM image archive found in export folder"
       return
     fi
   fi
+  
+  echo "    Extracting VM image archive..."
+  tar -xzf "$vm_archive" -C "$temp_extract_dir" || {
+    rm -rf "$temp_extract_dir"
+    pause "❌ Failed to extract VM image archive"
+    return
+  }
+  
+  # Blockchain parts are at folder level in unified format
+  blockchain_dir="$item_path"
+  extract_dir="$temp_extract_dir"  # Point to extracted VM files
   
   echo "    ✓ Archive extracted"
   
-  # Verify disk image exists (handle both old and new formats)
-  local source_disk=""
-  if [[ -f "${extract_dir}/gm-base.qcow2" ]]; then
-    source_disk="${extract_dir}/gm-base.qcow2"  # Old format
-  elif [[ -f "${extract_dir}/vm-disk.qcow2" ]]; then
-    source_disk="${extract_dir}/vm-disk.qcow2"  # New format
-  fi
+  # Verify disk image exists (unified format)
+  local source_disk="${extract_dir}/vm-disk.qcow2"
   
-  if [[ -z "$source_disk" ]]; then
+  if [[ ! -f "$source_disk" ]]; then
     rm -rf "$temp_extract_dir"
-    pause "❌ Disk image not found in archive (expected gm-base.qcow2 or vm-disk.qcow2)"
+    pause "❌ Disk image not found in archive (expected vm-disk.qcow2)"
     return
   fi
   
@@ -2581,7 +2492,7 @@ import_base_vm(){
   local has_modular_blockchain=false
   
   # Check if blockchain data is present in the folder
-  if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1 || ls "$blockchain_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
+  if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
     has_modular_blockchain=true
   fi
   
@@ -2742,7 +2653,7 @@ torcontrol=127.0.0.1:9051
       rm -rf ~/.cache/gm-blockchain-temp-*
     fi
     
-    # Check for new naming (blockchain.tar.gz.part*)
+    # Check for blockchain parts (blockchain.tar.gz.part*)
     if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
       echo "  Found blockchain data in unified export folder..."
       echo "  Reassembling blockchain parts..."
@@ -2784,6 +2695,8 @@ torcontrol=127.0.0.1:9051
               echo "    ✓ Blockchain decompressed"
               local tar_file="$blockchain_temp/blockchain.tar"
               
+              echo "    Injecting blockchain into VM disk (this may take several minutes)..."
+              
               # Capture full error output
               local inject_output
               inject_output=$(sudo virt-tar-in -a "$dest_disk" "$tar_file" /var/lib/bitcoin 2>&1)
@@ -2824,78 +2737,9 @@ torcontrol=127.0.0.1:9051
         fi
       fi
       
-    # OLD format with gm- prefix
-    elif ls "$blockchain_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
-      echo "  Found blockchain data (old naming)..."
-      echo "  Reassembling blockchain parts..."
-      
-      local blockchain_temp="$HOME/.cache/gm-blockchain-temp-$$"
-      mkdir -p "$blockchain_temp"
-      
-      cat "$blockchain_dir"/gm-blockchain.tar.gz.part* > "$blockchain_temp/gm-blockchain.tar.gz" || {
-        rm -rf "$blockchain_temp"
-        echo "    ⚠ Failed to reassemble blockchain - continuing without it"
-      }
-      
-      # Verify checksum if available
-      if [[ -f "$blockchain_dir/gm-blockchain.tar.gz.sha256" ]]; then
-        echo "  Verifying blockchain checksum..."
-        local expected_sum=$(grep "gm-blockchain.tar.gz$" "$blockchain_dir/gm-blockchain.tar.gz.sha256" | awk '{print $1}')
-        local actual_sum=$(sha256sum "$blockchain_temp/gm-blockchain.tar.gz" | awk '{print $1}')
-        if [[ "$expected_sum" != "$actual_sum" ]]; then
-          rm -rf "$blockchain_temp"
-          echo "    ⚠ Blockchain checksum mismatch - continuing without it"
-        else
-          echo "    ✓ Checksum verified"
-          
-          # Inject blockchain into VM disk
-          echo "  Injecting blockchain into VM disk..."
-          echo "  Decompressing blockchain archive..."
-          if ! gunzip "$blockchain_temp/gm-blockchain.tar.gz"; then
-            echo "    ✗ Failed to decompress blockchain"
-            rm -rf "$blockchain_temp"
-          else
-            echo "    ✓ Blockchain decompressed"
-            local tar_file="$blockchain_temp/gm-blockchain.tar"
-            
-            # Capture full error output
-            local inject_output
-            inject_output=$(sudo virt-tar-in -a "$dest_disk" "$tar_file" /var/lib/bitcoin 2>&1)
-            local inject_status=$?
-            
-            # Filter out benign warnings
-            local filtered_output=$(echo "$inject_output" | grep -v "random seed")
-            
-            if [[ $inject_status -eq 0 ]]; then
-              echo "    ✓ Blockchain data imported successfully into /var/lib/bitcoin"
-              
-              # Fix ownership - tar preserves UIDs which may not match the new VM's bitcoin user
-              echo "    Fixing ownership of blockchain files..."
-              sudo virt-customize -a "$dest_disk" --no-selinux-relabel \
-                --run-command "chown -R bitcoin:bitcoin /var/lib/bitcoin" \
-                2>&1 | grep -v "random seed" >&2
-              
-              if [ "${PIPESTATUS[0]}" -eq 0 ]; then
-                echo "    ✓ Ownership fixed"
-              else
-                echo "    ⚠ Warning: Could not fix ownership (bitcoind may fail to start)"
-              fi
-              
-              rm -rf "$blockchain_temp"
-            else
-              echo "    ✗ Failed to inject blockchain into VM (exit code: $inject_status)"
-              if [[ -n "$filtered_output" ]]; then
-                echo "    Error output:"
-                echo "$filtered_output" | sed 's/^/      /'
-              fi
-              # Don't remove temp dir so we can investigate
-            fi
-          fi
-        fi
-      else
-        echo "    ⚠ No checksum file found - skipping blockchain import"
-        rm -rf "$blockchain_temp"
-      fi
+    else
+      echo "  ⚠ No blockchain data found - VM will sync from network"
+      echo "    (This may take several hours on first startup)"
     fi
   elif [[ -f "$extract_dir/blockchain-data.tar.gz" ]]; then
     # OLD monolithic format with blockchain included
@@ -2921,6 +2765,8 @@ torcontrol=127.0.0.1:9051
     else
       echo "    ✓ Blockchain decompressed"
       local tar_file="$blockchain_temp/blockchain-data.tar"
+      
+      echo "    Injecting blockchain into VM disk (this may take several minutes)..."
       
       # Capture full error output
       local inject_output
@@ -3079,8 +2925,8 @@ torcontrol=127.0.0.1:9051
 #   2. Fetch available releases from GitHub API
 #   3. Let user select a release tag
 #   4. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
-#   5. Download VM image (vm-image-*.tar.gz or gm-vm-image-*.tar.gz)
-#   6. Download container image (container-image-*.tar.gz or gm-container-image-*.tar.gz)
+#   5. Download VM image (vm-image.tar.gz)
+#   6. Download container image (container-image.tar.gz)
 #   7. Verify checksums for parts and images (prefer SHA256SUMS)
 #   8. Reassemble blockchain from parts
 #   9. Extract VM image (vm-disk.qcow2, vm-definition.xml)
@@ -3107,7 +2953,7 @@ import_from_github(){
     [[ -z "$dir" || ! -d "$dir" ]] && return
     
     # Remove temporary files (keep original downloads for USB transfer)
-    rm -f "$dir"/blockchain.tar.gz "$dir"/gm-blockchain.tar.gz 2>/dev/null
+    rm -f "$dir"/blockchain.tar.gz 2>/dev/null
     rm -rf "$dir/blockchain-data" "$dir/vm-image" 2>/dev/null
     
     # Clean up blockchain decompression temp directory if it exists
@@ -3194,56 +3040,32 @@ import_from_github(){
   local release_assets
   release_assets=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$selected_tag\") | .assets")
   
-  # Find blockchain parts, VM image, and checksums (support both old and new naming)
+  # Find blockchain parts, VM image, and checksums
   local blockchain_part_urls=()
   local blockchain_part_names=()
-  local blockchain_checksum_url=""
   local vm_image_url=""
   local vm_image_name=""
-  local vm_checksum_url=""
   local container_image_url=""
   local container_image_name=""
-  local container_checksum_url=""
   local sha256sums_url=""
   
   while IFS='|' read -r name url; do
     [[ -z "$name" ]] && continue
-    # NEW naming (blockchain.tar.gz.part*)
+    # Blockchain parts (blockchain.tar.gz.part*)
     if [[ "$name" =~ ^blockchain\.tar\.gz\.part[0-9]+$ ]]; then
       blockchain_part_names+=("$name")
       blockchain_part_urls+=("$url")
-    # OLD naming (gm-blockchain.tar.gz.part*)
-    elif [[ "$name" =~ ^gm-blockchain\.tar\.gz\.part[0-9]+$ ]]; then
-      blockchain_part_names+=("$name")
-      blockchain_part_urls+=("$url")
-    # NEW unified checksum file
+    # Unified checksum file
     elif [[ "$name" == "SHA256SUMS" ]]; then
       sha256sums_url="$url"
-    # OLD blockchain checksum
-    elif [[ "$name" == "gm-blockchain.tar.gz.sha256" ]]; then
-      blockchain_checksum_url="$url"
-    # NEW VM image naming (vm-image.tar.gz or vm-image-*.tar.gz)
-    elif [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz$ ]]; then
+    # VM image (vm-image.tar.gz)
+    elif [[ "$name" == "vm-image.tar.gz" ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
-    # OLD VM image naming (gm-vm-image-*)
-    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz$ ]]; then
-      vm_image_name="$name"
-      vm_image_url="$url"
-    # OLD VM image checksum
-    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz\.sha256$ ]]; then
-      vm_checksum_url="$url"
-    # NEW container image naming (container-image.tar.gz or container-image-*.tar.gz)
-    elif [[ "$name" =~ ^container-image(-.*)?\.tar\.gz$ ]]; then
+    # Container image (container-image.tar.gz)
+    elif [[ "$name" == "container-image.tar.gz" ]]; then
       container_image_name="$name"
       container_image_url="$url"
-    # OLD container image naming (gm-container-image-*)
-    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz$ ]]; then
-      container_image_name="$name"
-      container_image_url="$url"
-    # OLD container image checksum
-    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image(-.*)?\.tar\.gz\.sha256$ ]]; then
-      container_checksum_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
   
@@ -3340,7 +3162,7 @@ import_from_github(){
     fi
   done
   
-  # Download checksums (prefer unified SHA256SUMS, fall back to old format)
+  # Download checksums (unified SHA256SUMS format only)
   if [[ -n "$sha256sums_url" ]]; then
     echo ""
     echo "Downloading unified checksum file (SHA256SUMS)..."
@@ -3348,14 +3170,6 @@ import_from_github(){
       curl -sL -o "$download_dir/SHA256SUMS" "$sha256sums_url"
     else
       wget -q -O "$download_dir/SHA256SUMS" "$sha256sums_url"
-    fi
-  elif [[ -n "$blockchain_checksum_url" ]]; then
-    echo ""
-    echo "Downloading blockchain checksum (old format)..."
-    if [[ "$download_tool" == "curl" ]]; then
-      curl -sL -o "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
-    else
-      wget -q -O "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
     fi
   fi
   
@@ -3379,17 +3193,6 @@ import_from_github(){
     }
   fi
   
-  # Download VM checksum (if separate file exists in old format)
-  if [[ -z "$sha256sums_url" ]] && [[ -n "$vm_checksum_url" ]]; then
-    echo ""
-    echo "Downloading VM image checksum (old format)..."
-    if [[ "$download_tool" == "curl" ]]; then
-      curl -sL -o "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
-    else
-      wget -q -O "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
-    fi
-  fi
-  
   # Download container image (if available)
   if [[ -n "$container_image_url" ]]; then
     echo ""
@@ -3407,17 +3210,6 @@ import_from_github(){
       wget --show-progress -O "$download_dir/$container_image_name" "$container_image_url" || {
         echo "⚠ Failed to download container image (optional, continuing...)"
       }
-    fi
-    
-    # Download container checksum (if separate file exists in old format)
-    if [[ -z "$sha256sums_url" ]] && [[ -n "$container_checksum_url" ]]; then
-      echo ""
-      echo "Downloading container image checksum (old format)..."
-      if [[ "$download_tool" == "curl" ]]; then
-        curl -sL -o "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
-      else
-        wget -q -O "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
-      fi
     fi
   fi
   
@@ -3484,50 +3276,6 @@ import_from_github(){
     fi
     
     cd - >/dev/null
-    
-  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
-    echo "Verifying blockchain parts (old format)..."
-    cd "$download_dir"
-    
-    local verify_failed=false
-    while IFS= read -r line; do
-      [[ "$line" =~ ^# ]] && continue  # Skip comments
-      [[ -z "$line" ]] && continue     # Skip empty lines
-      [[ ! "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip non-part lines
-      
-      if ! echo "$line" | sha256sum -c --quiet 2>/dev/null; then
-        echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
-        verify_failed=true
-      fi
-    done < "gm-blockchain.tar.gz.sha256"
-    
-    if [[ "$verify_failed" == "true" ]]; then
-      cd - >/dev/null
-      pause "❌ One or more blockchain parts failed checksum verification!"
-      return
-    fi
-    
-    echo "    ✓ All blockchain parts verified"
-    cd - >/dev/null
-    
-    # Verify VM image (old format - separate file)
-    if [[ -f "$download_dir/${vm_image_name}.sha256" ]]; then
-      echo ""
-      echo "Verifying VM image (old format)..."
-      cd "$download_dir"
-      
-      if sha256sum -c "${vm_image_name}.sha256" --quiet 2>/dev/null; then
-        echo "    ✓ VM image verified"
-      else
-        cd - >/dev/null
-        pause "❌ VM image checksum verification failed!"
-        return
-      fi
-      
-      cd - >/dev/null
-    else
-      echo "    ⚠ No VM image checksum file (skipping verification)"
-    fi
   else
     echo "    ⚠ No checksum files found (skipping verification)"
   fi
@@ -3539,16 +3287,10 @@ import_from_github(){
   echo "═══════════════════════════════════════════════════════════════════════════════"
   echo ""
   
-  # Detect naming scheme (new: blockchain.tar.gz.part*, old: gm-blockchain.tar.gz.part*)
-  local blockchain_archive=""
+  # Reassemble blockchain from parts
   if ls "$download_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
     cat "$download_dir"/blockchain.tar.gz.part* > "$download_dir/blockchain.tar.gz"
-    blockchain_archive="blockchain.tar.gz"
-    echo "✓ Blockchain reassembled (new naming)"
-  elif ls "$download_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
-    cat "$download_dir"/gm-blockchain.tar.gz.part* > "$download_dir/gm-blockchain.tar.gz"
-    blockchain_archive="gm-blockchain.tar.gz"
-    echo "✓ Blockchain reassembled (old naming)"
+    echo "✓ Blockchain reassembled"
   else
     pause "❌ No blockchain parts found to reassemble!"
     return
@@ -3560,7 +3302,7 @@ import_from_github(){
     echo "Verifying reassembled blockchain..."
     cd "$download_dir"
     
-    if grep -q "$blockchain_archive\$" "SHA256SUMS" 2>/dev/null; then
+    if grep -q "blockchain\.tar\.gz\$" "SHA256SUMS" 2>/dev/null; then
       if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
         echo "    ✓ Reassembled blockchain verified"
       else
@@ -3573,32 +3315,8 @@ import_from_github(){
     fi
     
     cd - >/dev/null
-    
-  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
-    echo ""
-    echo "Verifying reassembled blockchain (old format)..."
-    cd "$download_dir"
-    
-    local reassembled_checksum=""
-    while IFS= read -r line; do
-      [[ "$line" =~ ^# ]] && continue
-      [[ -z "$line" ]] && continue
-      [[ "$line" =~ \.part[0-9][0-9] ]] && continue
-      reassembled_checksum="$line"
-      break
-    done < "gm-blockchain.tar.gz.sha256"
-    
-    if [[ -n "$reassembled_checksum" ]]; then
-      if echo "$reassembled_checksum" | sha256sum -c --quiet 2>/dev/null; then
-        echo "    ✓ Reassembled blockchain verified"
-      else
-        cd - >/dev/null
-        pause "❌ Reassembled blockchain checksum verification failed!"
-        return
-      fi
-    fi
-    
-    cd - >/dev/null
+  else
+    echo "    ⚠ No checksum files found (skipping verification)"
   fi
   
   # Step 5: Extract and import VM image
@@ -3642,16 +3360,16 @@ import_from_github(){
   echo "Decompressing blockchain archive..."
   local blockchain_temp="$HOME/.cache/gm-blockchain-temp-$$"
   mkdir -p "$blockchain_temp"
-  cp "$download_dir/$blockchain_archive" "$blockchain_temp/"
+  cp "$download_dir/blockchain.tar.gz" "$blockchain_temp/"
   
-  if ! gunzip "$blockchain_temp/$blockchain_archive"; then
+  if ! gunzip "$blockchain_temp/blockchain.tar.gz"; then
     rm -rf "$blockchain_temp"
     pause "❌ Failed to decompress blockchain archive"
     return
   fi
   
-  # Get the decompressed tar filename (remove .gz extension)
-  local tar_file="$blockchain_temp/${blockchain_archive%.gz}"
+  # Get the decompressed tar filename (remove .gz extension from blockchain.tar.gz)
+  local tar_file="$blockchain_temp/blockchain.tar"
   
   echo "Injecting blockchain into VM disk (this may take several minutes)..."
   sudo virt-tar-in -a "$vm_disk" "$tar_file" /var/lib/bitcoin || {
@@ -4107,6 +3825,125 @@ get_peer_breakdown(){
   echo "$breakdown"
 }
 
+# get_node_classification: Classify the running node on VM
+# Args: $1 = IP address of VM
+# Returns: Classification string based on the node's subver and services
+# Categories:
+#   Libre Relay/Garbageman: Has Libre Relay service bit (0x0400)
+#   Bitcoin Knots: subver contains "knots" or "Knots"
+#   Bitcoin Core pre-30: subver contains "Satoshi" and version < 30
+#   Bitcoin Core v30+: subver contains "Satoshi" and version >= 30
+#   Unknown: Doesn't match any of the above
+get_node_classification(){
+  local ip="$1"
+  local netinfo
+  
+  # Get network information from the running node
+  netinfo=$(gssh "$ip" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null' 2>/dev/null || echo "")
+  
+  if [[ -z "$netinfo" ]]; then
+    echo ""  # Blank - RPC not ready yet
+    return
+  fi
+  
+  local subver=$(jq -r '.subver // ""' <<<"$netinfo" 2>/dev/null)
+  local services=$(jq -r '.localservices // ""' <<<"$netinfo" 2>/dev/null)
+  
+  # Check if localservices is available yet (empty means not ready)
+  if [[ -z "$services" ]]; then
+    echo ""  # Blank - node is still starting up
+    return
+  fi
+  
+  # Check for Libre Relay bit (0x0400 = 1024 in decimal)
+  # Now we know services field is populated, so we can safely parse it
+  local services_dec=0
+  if [[ "$services" =~ ^[0-9a-fA-F]+$ ]]; then
+    services_dec=$((16#${services}))
+  fi
+  if (( (services_dec & 0x0400) != 0 )); then
+    echo "Libre Relay/Garbageman"
+    return
+  fi
+  
+  # Libre Relay bit is not set, check if it's a known implementation
+  # Check user agent string patterns
+  if [[ "$subver" =~ [Kk]nots ]]; then
+    echo "Bitcoin Knots"
+  elif [[ "$subver" =~ /Satoshi:([0-9]+)\. ]]; then
+    local version="${BASH_REMATCH[1]}"
+    if [[ "$version" -ge 30 ]]; then
+      echo "Bitcoin Core v30+"
+    else
+      echo "Bitcoin Core pre-30"
+    fi
+  else
+    echo "Unknown"  # Other implementation with Libre Relay bit = 0
+  fi
+}
+
+# debug_node_classification: Debug helper to test classification logic
+# Usage: debug_node_classification <vm_ip_or_container_name> [vm|container]
+debug_node_classification(){
+  local target="$1"
+  local mode="${2:-vm}"
+  
+  echo "=== Node Classification Debug ==="
+  echo "Target: $target"
+  echo "Mode: $mode"
+  echo ""
+  
+  local netinfo
+  if [[ "$mode" == "container" ]]; then
+    echo "Getting network info from container..."
+    netinfo=$(container_exec "$target" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>&1)
+  else
+    echo "Getting network info from VM..."
+    netinfo=$(gssh "$target" '/usr/local/bin/bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>&1')
+  fi
+  
+  echo "RPC Response:"
+  echo "$netinfo"
+  echo ""
+  
+  if [[ -z "$netinfo" || "$netinfo" =~ error ]]; then
+    echo "Classification: Empty (RPC not ready)"
+    return
+  fi
+  
+  local subver=$(echo "$netinfo" | jq -r '.subver // ""' 2>/dev/null)
+  local services=$(echo "$netinfo" | jq -r '.localservices // ""' 2>/dev/null)
+  
+  echo "Parsed values:"
+  echo "  subver: '$subver'"
+  echo "  services: '$services'"
+  echo ""
+  
+  if [[ -z "$services" ]]; then
+    echo "Classification: Empty (services not ready)"
+    return
+  fi
+  
+  local services_dec=0
+  if [[ "$services" =~ ^[0-9a-fA-F]+$ ]]; then
+    services_dec=$((16#${services}))
+    echo "  services_dec: $services_dec"
+    echo "  Libre Relay bit (0x0400 = 1024): $(( (services_dec & 0x0400) != 0 ? 1 : 0 ))"
+  else
+    echo "  services format invalid"
+  fi
+  echo ""
+  
+  # Call the actual classification function
+  if [[ "$mode" == "container" ]]; then
+    local result=$(get_node_classification_container "$target")
+  else
+    local result=$(get_node_classification "$target")
+  fi
+  
+  echo "Final Classification: '$result'"
+}
+
 # monitor_vm_status: Live monitoring display for any VM
 # Purpose: Show real-time status with auto-refresh (like IBD monitor but simpler)
 # Args: $1 = VM name to monitor
@@ -4163,6 +4000,9 @@ monitor_vm_status(){
         # Get detailed peer breakdown
         local peer_breakdown=$(get_peer_breakdown "$ip")
         
+        # Get node classification
+        local node_classification=$(get_node_classification "$ip")
+        
         # Calculate percentage
         local pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
       fi
@@ -4207,9 +4047,14 @@ monitor_vm_status(){
       fi
       printf "║%-80s║\n" ""
       printf "║%-80s║\n" "  Bitcoin Status:"
-      printf "║%-80s║\n" "    Blocks:   $blocks / $headers"
-      printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
-      printf "║%-80s║\n" "    Peers:    $peer_breakdown"
+      if [[ -n "$node_classification" ]]; then
+        printf "║%-80s║\n" "    Node Type:  $node_classification"
+      else
+        printf "║%-80s║\n" "    Node Type:  Starting..."
+      fi
+      printf "║%-80s║\n" "    Blocks:     $blocks / $headers"
+      printf "║%-80s║\n" "    Progress:   ${pct}% (${vp})"
+      printf "║%-80s║\n" "    Peers:      $peer_breakdown"
       printf "║%-80s║\n" ""
     elif [[ "$state" == "running" ]]; then
       printf "║%-80s║\n" "  Network Status:"
@@ -4604,6 +4449,9 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     
     # Get detailed peer breakdown
     local peer_breakdown=$(get_peer_breakdown "$ip")
+    
+    # Get node classification
+    local node_classification=$(get_node_classification "$ip")
 
     # Check if the last block is stale (more than 2 hours old)
     local current_time=$(date +%s)
@@ -4674,12 +4522,17 @@ Current VM configuration: ${current_vcpus} vCPUs, ${current_ram_mb} MiB RAM"
     printf "║%-80s║\n" "    IP:   ${ip}"
     printf "║%-80s║\n" ""
     printf "║%-80s║\n" "  Bitcoin Sync Status:"
-    printf "║%-80s║\n" "    Blocks:   ${blocks} / ${headers}"
-    printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
-    printf "║%-80s║\n" "    IBD:      ${ibd}"
-    printf "║%-80s║\n" "    Peers:    ${peer_breakdown}"
+    if [[ -n "$node_classification" ]]; then
+      printf "║%-80s║\n" "    Node Type:  $node_classification"
+    else
+      printf "║%-80s║\n" "    Node Type:  Starting..."
+    fi
+    printf "║%-80s║\n" "    Blocks:     ${blocks} / ${headers}"
+    printf "║%-80s║\n" "    Progress:   ${pct}% (${vp})"
+    printf "║%-80s║\n" "    IBD:        ${ibd}"
+    printf "║%-80s║\n" "    Peers:      ${peer_breakdown}"
     if [[ -n "$sync_status_msg" ]]; then
-      printf "║%-80s║\n" "    Status:   ${sync_status_msg}"
+      printf "║%-80s║\n" "    Status:     ${sync_status_msg}"
     fi
     printf "║%-80s║\n" ""
     printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
@@ -5384,7 +5237,7 @@ What's Included:
 
 What's NOT Included:
 --------------------
-- Blockchain data (download separately: gm-blockchain-*.tar.gz.part*)
+- Blockchain data (download separately: blockchain.tar.gz.part*)
 - Tor keys (regenerated on first boot)
 - SSH keys (regenerated on first boot)
 - Logs and temporary files
@@ -5409,8 +5262,8 @@ Method 2 (Manual):
   1. Extract this archive
   2. Download and reassemble blockchain:
      cd /path/to/blockchain/export
-     cat gm-blockchain.tar.gz.part* > gm-blockchain.tar.gz
-     tar xzf gm-blockchain.tar.gz
+     cat blockchain.tar.gz.part* > blockchain.tar.gz
+     tar xzf blockchain.tar.gz
   3. Inject blockchain into VM disk:
      sudo virt-tar-in -a vm-disk.qcow2 /path/to/blockchain/data /var/lib/bitcoin
   4. Copy disk to /var/lib/libvirt/images/gm-base.qcow2
@@ -5544,7 +5397,7 @@ METADATA
   echo "    • ${vm_archive_name}.sha256 - Image checksum"
   echo ""
   echo "  Blockchain Components:"
-  echo "    • Parts: $(ls -1 "$blockchain_export_dir"/gm-blockchain.tar.gz.part* 2>/dev/null | wc -l) files"
+  echo "    • Parts: $(ls -1 "$blockchain_export_dir"/blockchain.tar.gz.part* 2>/dev/null | wc -l) files"
   # Success!
   echo ""
   echo "╔════════════════════════════════════════════════════════════════════════════════╗"
@@ -6620,6 +6473,63 @@ get_peer_breakdown_container(){
   echo "$breakdown"
 }
 
+# get_node_classification_container: Classify the running node in container
+# Args: $1 = Container name
+# Returns: Classification string based on the node's subver and services
+# Categories:
+#   Libre Relay/Garbageman: Has Libre Relay service bit (0x0400)
+#   Bitcoin Knots: subver contains "knots" or "Knots"
+#   Bitcoin Core pre-30: subver contains "Satoshi" and version < 30
+#   Bitcoin Core v30+: subver contains "Satoshi" and version >= 30
+#   Unknown: Doesn't match any of the above
+get_node_classification_container(){
+  local container_name="$1"
+  local netinfo
+  
+  # Get network information from the running node
+  netinfo=$(container_exec "$container_name" bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf -datadir=/var/lib/bitcoin getnetworkinfo 2>/dev/null || echo "")
+  
+  if [[ -z "$netinfo" ]]; then
+    echo ""  # Blank - RPC not ready yet
+    return
+  fi
+  
+  local subver=$(echo "$netinfo" | jq -r '.subver // ""' 2>/dev/null)
+  local services=$(echo "$netinfo" | jq -r '.localservices // ""' 2>/dev/null)
+  
+  # Check if localservices is available yet (empty means not ready)
+  if [[ -z "$services" ]]; then
+    echo ""  # Blank - node is still starting up
+    return
+  fi
+  
+  # Check for Libre Relay bit (0x0400 = 1024 in decimal)
+  # Now we know services field is populated, so we can safely parse it
+  local services_dec=0
+  if [[ "$services" =~ ^[0-9a-fA-F]+$ ]]; then
+    services_dec=$((16#${services}))
+  fi
+  if (( (services_dec & 0x0400) != 0 )); then
+    echo "Libre Relay/Garbageman"
+    return
+  fi
+  
+  # Libre Relay bit is not set, check if it's a known implementation
+  # Check user agent string patterns
+  if [[ "$subver" =~ [Kk]nots ]]; then
+    echo "Bitcoin Knots"
+  elif [[ "$subver" =~ /Satoshi:([0-9]+)\. ]]; then
+    local version="${BASH_REMATCH[1]}"
+    if [[ "$version" -ge 30 ]]; then
+      echo "Bitcoin Core v30+"
+    else
+      echo "Bitcoin Core pre-30"
+    fi
+  else
+    echo "Unknown"  # Other implementation with Libre Relay bit = 0
+  fi
+}
+
 # monitor_container_sync: Monitor IBD sync progress in container with live updates
 # Purpose: Display real-time sync progress with automatic refresh
 # Process:
@@ -6866,6 +6776,10 @@ Suggested for initial sync: ${HOST_SUGGEST_SYNC_VCPUS} CPUs, ${HOST_SUGGEST_SYNC
     local peer_breakdown
     peer_breakdown=$(get_peer_breakdown_container "$CONTAINER_NAME")
     
+    # Get node classification
+    local node_classification
+    node_classification=$(get_node_classification_container "$CONTAINER_NAME")
+    
     # Check for stale tip
     local current_time=$(date +%s)
     local time_block
@@ -6934,12 +6848,17 @@ Suggested for initial sync: ${HOST_SUGGEST_SYNC_VCPUS} CPUs, ${HOST_SUGGEST_SYNC
     printf "║%-80s║\n" "    Image: ${CONTAINER_IMAGE}"
     printf "║%-80s║\n" ""
     printf "║%-80s║\n" "  Bitcoin Sync Status:"
-    printf "║%-80s║\n" "    Blocks:   ${blocks} / ${headers}"
-    printf "║%-80s║\n" "    Progress: ${pct}% (${progress})"
-    printf "║%-80s║\n" "    IBD:      ${ibd}"
-    printf "║%-80s║\n" "    Peers:    ${peer_breakdown}"
+    if [[ -n "$node_classification" ]]; then
+      printf "║%-80s║\n" "    Node Type:  $node_classification"
+    else
+      printf "║%-80s║\n" "    Node Type:  Starting..."
+    fi
+    printf "║%-80s║\n" "    Blocks:     ${blocks} / ${headers}"
+    printf "║%-80s║\n" "    Progress:   ${pct}% (${progress})"
+    printf "║%-80s║\n" "    IBD:        ${ibd}"
+    printf "║%-80s║\n" "    Peers:      ${peer_breakdown}"
     if [[ -n "$sync_status_msg" ]]; then
-      printf "║%-80s║\n" "    Status:   ${sync_status_msg}"
+      printf "║%-80s║\n" "    Status:     ${sync_status_msg}"
     fi
     printf "║%-80s║\n" ""
     printf "╠════════════════════════════════════════════════════════════════════════════════╣\n"
@@ -7608,6 +7527,9 @@ monitor_container_status(){
       # Get detailed peer breakdown
       local peer_breakdown=$(get_peer_breakdown_container "$container_name")
       
+      # Get node classification
+      local node_classification=$(get_node_classification_container "$container_name")
+      
       # Calculate percentage
       pct=$(awk -v p="$vp" 'BEGIN{if(p<0)p=0;if(p>1)p=1;printf "%d", int(p*100+0.5)}')
     else
@@ -7674,9 +7596,14 @@ monitor_container_status(){
       fi
       printf "║%-80s║\n" ""
       printf "║%-80s║\n" "  Bitcoin Status:"
-      printf "║%-80s║\n" "    Blocks:   $blocks / $headers"
-      printf "║%-80s║\n" "    Progress: ${pct}% (${vp})"
-      printf "║%-80s║\n" "    Peers:    $peer_breakdown"
+      if [[ -n "$node_classification" ]]; then
+        printf "║%-80s║\n" "    Node Type:  $node_classification"
+      else
+        printf "║%-80s║\n" "    Node Type:  Starting..."
+      fi
+      printf "║%-80s║\n" "    Blocks:     $blocks / $headers"
+      printf "║%-80s║\n" "    Progress:   ${pct}% (${vp})"
+      printf "║%-80s║\n" "    Peers:      $peer_breakdown"
       printf "║%-80s║\n" ""
     else
       printf "║%-80s║\n" "  Container is not running"
@@ -8275,20 +8202,18 @@ METADATA
   pause "Export complete!\n\nUnified export folder: $export_dir/"
 }
 
-# import_base_container: Import container from export archive (supports both formats)
-# Purpose: Restore container image and blockchain data from portable archive
+# import_base_container: Import container from export folder (unified format only)
+# Purpose: Restore container image and blockchain data from portable export
 # Supported inputs:
-#   - NEW unified export folder: gm-export-YYYYMMDD-HHMMSS/
-#     • May contain container and/or VM image archives plus blockchain parts
-#     • This function uses the container image; if only a VM image is found, user is guided to the VM import
-#   - OLD monolithic archive:   gm-container-export-YYYYMMDD-HHMMSS.tar.gz (image + blockchain)
-#   - OLD modular container:    gm-container-image-YYYYMMDD-HHMMSS.tar.gz (image only)
-# Process (new unified folder):
+#   - Unified export folder: gm-export-YYYYMMDD-HHMMSS/
+#     • Contains container image archive (container-image.tar.gz) plus blockchain parts (blockchain.tar.gz.partN)
+#     • If only a VM image is found, user is guided to the VM import
+# Process:
 #   1. Let user configure defaults (reserves, container sizes, clearnet toggle)
 #   2. Scan ~/Downloads for gm-export-* folders
 #   3. Let user select which export to import
 #   4. Prefer container image; if missing but VM image present, show helpful guidance
-#   5. Verify checksums when available (SHA256SUMS or per-file .sha256)
+#   5. Verify checksums (SHA256SUMS)
 #   6. Load container image (docker/podman load)
 #   7. Create volume and inject blockchain if parts are present
 #   8. Create container with proper configuration
@@ -8313,25 +8238,18 @@ import_base_container(){
   local archives=()
   local export_items=()
   
-  # Look for NEW unified export folders (gm-export-*)
+  # Look for unified export folders (gm-export-*)
   while IFS= read -r -d '' folder; do
     # Check if it contains a container image archive OR VM image archive
     # This allows importing from folders that have either or both image types
-    if ls "$folder"/container-image-*.tar.gz >/dev/null 2>&1 || \
-       ls "$folder"/gm-container-image-*.tar.gz >/dev/null 2>&1 || \
-       ls "$folder"/vm-image-*.tar.gz >/dev/null 2>&1 || \
-       ls "$folder"/gm-vm-image-*.tar.gz >/dev/null 2>&1; then
+    if ls "$folder"/container-image.tar.gz >/dev/null 2>&1 || \
+       ls "$folder"/vm-image.tar.gz >/dev/null 2>&1; then
       export_items+=("folder:$folder")
     fi
   done < <(find "$HOME/Downloads" -maxdepth 1 -type d -name "gm-export-*" -print0 2>/dev/null | sort -z)
   
-  # Look for OLD format archives (gm-container-export, gm-container-image .tar.gz files)
-  while IFS= read -r -d '' archive; do
-    export_items+=("file:$archive")
-  done < <(find "$HOME/Downloads" -maxdepth 1 -type f \( -name "gm-container-export-*.tar.gz" -o -name "gm-container-image-*.tar.gz" \) -print0 2>/dev/null | sort -z)
-  
   if [[ ${#export_items[@]} -eq 0 ]]; then
-    pause "No container exports found in ~/Downloads/\n\nLooking for:\n  gm-export-* folders with container or VM images\n  gm-container-export-*.tar.gz (old format)\n  gm-container-image-*.tar.gz (old modular format)"
+    pause "No container exports found in ~/Downloads/\n\nLooking for:\n  gm-export-* folders with container-image.tar.gz files"
     return
   fi
   
@@ -8344,29 +8262,16 @@ import_base_container(){
     local basename=$(basename "$path")
     local display
     
-    if [[ "$type" == "folder" ]]; then
-      local folder_size=$(du -sh "$path" 2>/dev/null | cut -f1)
-      
-      # Check if blockchain data is present
-      local blockchain_status="blockchain included"
-      if ! ls "$path"/blockchain.tar.gz.part* >/dev/null 2>&1 && \
-         ! ls "$path"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
-        blockchain_status="image only, no blockchain"
-      fi
-      
-      display="$basename/ ($folder_size) [${blockchain_status}]"
-    else
-      local file_size=$(du -h "$path" | cut -f1)
-      
-      # Old archives likely have blockchain included (monolithic format)
-      local blockchain_status="blockchain included"
-      if [[ "$basename" =~ container-image ]]; then
-        blockchain_status="image only, no blockchain"
-      fi
-      
-      display="$basename ($file_size) [${blockchain_status}]"
+    # All items are now folders (unified format)
+    local folder_size=$(du -sh "$path" 2>/dev/null | cut -f1)
+    
+    # Check if blockchain data is present
+    local blockchain_status="blockchain included"
+    if ! ls "$path"/blockchain.tar.gz.part* >/dev/null 2>&1; then
+      blockchain_status="image only, no blockchain"
     fi
     
+    display="$basename/ ($folder_size) [${blockchain_status}]"
     menu_items+=("$i" "$display")
   done
   
@@ -8396,16 +8301,12 @@ import_base_container(){
     echo "[1/5] Using unified export folder..."
     extract_dir="$item_path"
     
-    # Find the image archive within the folder (new or old naming)
-    local image_archive=$(ls "$extract_dir"/container-image-*.tar.gz 2>/dev/null | head -n1)
-    if [[ -z "$image_archive" ]]; then
-      # Try old naming
-      image_archive=$(ls "$extract_dir"/gm-container-image-*.tar.gz 2>/dev/null | head -n1)
-    fi
+    # Find the image archive within the folder
+    local image_archive=$(ls "$extract_dir"/container-image.tar.gz 2>/dev/null | head -n1)
     
     if [[ -z "$image_archive" ]]; then
       # Check if folder has VM image instead
-      if ls "$extract_dir"/vm-image-*.tar.gz >/dev/null 2>&1 || ls "$extract_dir"/gm-vm-image-*.tar.gz >/dev/null 2>&1; then
+      if ls "$extract_dir"/vm-image.tar.gz >/dev/null 2>&1; then
         pause "❌ This folder only contains a VM image.\n\nTo import as a VM:\n1. Cancel and return to main menu\n2. Choose 'Create Base VM'\n3. Select 'Import from file'\n4. Choose this same folder\n\nOr download/export a container image for this release."
         return
       else
@@ -8419,29 +8320,19 @@ import_base_container(){
     # Blockchain parts are at root level in new format
     blockchain_dir="$extract_dir"
     
+    # Blockchain parts are at root level in unified format
+    blockchain_dir="$extract_dir"
+    
   else
-    # OLD format: extract .tar.gz archive
-    echo "[1/5] Extracting archive..."
-    if ! tar -xzf "$item_path" -C "$temp_dir"; then
-      die "Failed to extract archive"
-    fi
-    
-    # Find extracted directory (old or new format naming)
-    extract_dir=$(find "$temp_dir" -maxdepth 1 -type d \( -name "gm-container-export-*" -o -name "gm-container-image-*" \) | head -n1)
-    
-    if [[ -z "$extract_dir" ]]; then
-      die "Could not find extracted directory in archive"
-    fi
+    die "❌ Only unified export folders are supported.\n\nLooking for: gm-export-* folders"
   fi
   
-  # Find container image tar (handle both formats)
+  # Find container image tar in extracted archive
   local image_tar=""
   if [[ -f "$temp_dir/container-image.tar" ]]; then
     image_tar="$temp_dir/container-image.tar"  # Extracted from archive
   elif [[ -f "$extract_dir/container-image.tar" ]]; then
-    image_tar="$extract_dir/container-image.tar"  # Old format in extracted dir
-  elif [[ -f "$extract_dir/garbageman-image.tar" ]]; then
-    image_tar="$extract_dir/garbageman-image.tar"  # Alternative name
+    image_tar="$extract_dir/container-image.tar"  # In export folder
   fi
   
   if [[ -z "$image_tar" ]]; then
@@ -8468,7 +8359,7 @@ import_base_container(){
   if [[ -n "$blockchain_dir" && -d "$blockchain_dir" ]]; then
     echo "  Found blockchain data in unified export folder..."
     
-    # Check for new naming (blockchain.tar.gz.part*)
+    # Check for blockchain parts (blockchain.tar.gz.part*)
     if ls "$blockchain_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
       echo "  Reassembling blockchain parts..."
       cat "$blockchain_dir"/blockchain.tar.gz.part* > "$temp_dir/blockchain.tar.gz" || die "Failed to reassemble blockchain"
@@ -8495,65 +8386,22 @@ import_base_container(){
       fi
       blockchain_imported=true
       echo "    ✓ Blockchain data imported"
-      
-    # OLD format with gm- prefix
-    elif ls "$blockchain_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
-      echo "  Reassembling blockchain parts (old naming)..."
-      cat "$blockchain_dir"/gm-blockchain.tar.gz.part* > "$temp_dir/gm-blockchain.tar.gz" || die "Failed to reassemble blockchain"
-      
-      # Verify checksum if available
-      if [[ -f "$blockchain_dir/gm-blockchain.tar.gz.sha256" ]]; then
-        echo "  Verifying blockchain checksum..."
-        local expected_sum=$(grep "gm-blockchain.tar.gz$" "$blockchain_dir/gm-blockchain.tar.gz.sha256" | awk '{print $1}')
-        local actual_sum=$(sha256sum "$temp_dir/gm-blockchain.tar.gz" | awk '{print $1}')
-        if [[ "$expected_sum" != "$actual_sum" ]]; then
-          die "Blockchain checksum mismatch! Export may be corrupted."
-        fi
-        echo "    ✓ Checksum verified"
-      fi
-      
-      # Import blockchain
-      echo "  Importing blockchain to volume..."
-      if ! container_cmd run --rm \
-        -v garbageman-data:/data \
-        -v "$temp_dir:/backup:ro" \
-        alpine:3.18 \
-        tar xzf /backup/gm-blockchain.tar.gz -C /data >/dev/null 2>&1; then
-        die "Failed to import blockchain data"
-      fi
-      blockchain_imported=true
-      echo "    ✓ Blockchain data imported"
+    else
+      echo "  ⚠ No blockchain data found in export"
+      echo "  ⚠ You'll need to:"
+      echo "    1. Download blockchain separately from GitHub"
+      echo "    2. Use 'Import from GitHub' option instead, OR"
+      echo "    3. Manually import blockchain data into the volume"
+      pause "\nThis export contains only the container image, not blockchain data.\n\nUse 'Import from GitHub' for complete import, or manually import blockchain."
+      return
     fi
-    
-  # OLD format: blockchain-data.tar.gz in extracted dir
-  elif [[ -f "$extract_dir/blockchain-data.tar.gz" ]]; then
-    echo "  Found blockchain data in archive (old monolithic format)..."
-    if ! container_cmd run --rm \
-      -v garbageman-data:/data \
-      -v "$extract_dir:/backup:ro" \
-      alpine:3.18 \
-      tar xzf /backup/blockchain-data.tar.gz -C /data >/dev/null 2>&1; then
-      die "Failed to import blockchain data"
-    fi
-    blockchain_imported=true
-    echo "    ✓ Blockchain data imported"
-  fi
-  
-  if [[ "$blockchain_imported" == "false" ]]; then
-    echo "  ⚠ No blockchain data found in export"
-    echo "  ⚠ You'll need to:"
-    echo "    1. Download blockchain separately from GitHub"
-    echo "    2. Use 'Import from GitHub' option instead, OR"
-    echo "    3. Manually import blockchain data into the volume"
-    pause "\nThis export contains only the container image, not blockchain data.\n\nUse 'Import from GitHub' for complete import, or manually import blockchain."
-    return
   fi
   
   # Create container
   echo ""
   echo "[4/5] Creating container..."
   
-  # Note about configuration
+  # Container will use CLEARNET_OK setting for bitcoind configuration
   echo "    Configuring for CLEARNET_OK=${CLEARNET_OK}"
   
   if ! container_cmd create \
@@ -8672,8 +8520,8 @@ torcontrol=127.0.0.1:9051
 #   2. Fetch available releases from GitHub API
 #   3. Let user select a release tag
 #   4. Download blockchain parts (blockchain.tar.gz.part01, part02, ...)
-#   5. Download container image (container-image-*.tar.gz or gm-container-image-*.tar.gz)
-#   6. Download VM image (vm-image-*.tar.gz or gm-vm-image-*.tar.gz)
+#   5. Download container image (container-image.tar.gz)
+#   6. Download VM image (vm-image.tar.gz)
 #   7. Verify checksums for parts and images (prefer SHA256SUMS)
 #   8. Reassemble blockchain from parts
 #   9. Load container image with docker/podman load
@@ -8699,7 +8547,7 @@ import_from_github_container(){
     [[ -z "$dir" || ! -d "$dir" ]] && return
     
     # Remove temporary files (keep original downloads for USB transfer)
-    rm -f "$dir"/blockchain.tar.gz "$dir"/gm-blockchain.tar.gz 2>/dev/null
+    rm -f "$dir"/blockchain.tar.gz 2>/dev/null
     rm -rf "$dir/blockchain-data" "$dir/container-image" 2>/dev/null
   }
   
@@ -8785,56 +8633,32 @@ import_from_github_container(){
   local release_assets
   release_assets=$(echo "$releases_json" | jq -r ".[] | select(.tag_name==\"$selected_tag\") | .assets")
   
-  # Find blockchain parts, container image, VM image, and checksums (support both old and new naming)
+  # Find blockchain parts, container image, VM image, and checksums
   local blockchain_part_urls=()
   local blockchain_part_names=()
-  local blockchain_checksum_url=""
   local container_image_url=""
   local container_image_name=""
-  local container_checksum_url=""
   local vm_image_url=""
   local vm_image_name=""
-  local vm_checksum_url=""
   local sha256sums_url=""
   
   while IFS='|' read -r name url; do
     [[ -z "$name" ]] && continue
-    # NEW naming (blockchain.tar.gz.part*)
+    # Blockchain parts (blockchain.tar.gz.part*)
     if [[ "$name" =~ ^blockchain\.tar\.gz\.part[0-9]+$ ]]; then
       blockchain_part_names+=("$name")
       blockchain_part_urls+=("$url")
-    # OLD naming (gm-blockchain.tar.gz.part*)
-    elif [[ "$name" =~ ^gm-blockchain\.tar\.gz\.part[0-9]+$ ]]; then
-      blockchain_part_names+=("$name")
-      blockchain_part_urls+=("$url")
-    # NEW unified checksum file
+    # Unified checksum file
     elif [[ "$name" == "SHA256SUMS" ]]; then
       sha256sums_url="$url"
-    # OLD blockchain checksum
-    elif [[ "$name" == "gm-blockchain.tar.gz.sha256" ]]; then
-      blockchain_checksum_url="$url"
-    # NEW container image naming (container-image.tar.gz or container-image-*.tar.gz)
-    elif [[ "$name" =~ ^container-image(-.*)?\.tar\.gz$ ]]; then
+    # Container image (container-image.tar.gz)
+    elif [[ "$name" == "container-image.tar.gz" ]]; then
       container_image_name="$name"
       container_image_url="$url"
-    # OLD container image naming (gm-container-image-*)
-    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz$ ]]; then
-      container_image_name="$name"
-      container_image_url="$url"
-    # OLD container image checksum
-    elif [[ "$name" =~ ^gm-container-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^container-image(-.*)?\.tar\.gz\.sha256$ ]]; then
-      container_checksum_url="$url"
-    # NEW VM image naming (vm-image.tar.gz or vm-image-*.tar.gz)
-    elif [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz$ ]]; then
+    # VM image (vm-image.tar.gz)
+    elif [[ "$name" == "vm-image.tar.gz" ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
-    # OLD VM image naming (gm-vm-image-*)
-    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz$ ]]; then
-      vm_image_name="$name"
-      vm_image_url="$url"
-    # OLD VM image checksum
-    elif [[ "$name" =~ ^gm-vm-image-.*\.tar\.gz\.sha256$ ]] || [[ "$name" =~ ^vm-image(-.*)?\.tar\.gz\.sha256$ ]]; then
-      vm_checksum_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
   
@@ -8939,7 +8763,7 @@ import_from_github_container(){
     fi
   done
   
-  # Download checksums (prefer unified SHA256SUMS, fall back to old format)
+  # Download checksums (unified SHA256SUMS format only)
   if [[ -n "$sha256sums_url" ]]; then
     echo ""
     echo "Downloading unified checksum file (SHA256SUMS)..."
@@ -8947,14 +8771,6 @@ import_from_github_container(){
       curl -sL -o "$download_dir/SHA256SUMS" "$sha256sums_url"
     else
       wget -q -O "$download_dir/SHA256SUMS" "$sha256sums_url"
-    fi
-  elif [[ -n "$blockchain_checksum_url" ]]; then
-    echo ""
-    echo "Downloading blockchain checksum (old format)..."
-    if [[ "$download_tool" == "curl" ]]; then
-      curl -sL -o "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
-    else
-      wget -q -O "$download_dir/gm-blockchain.tar.gz.sha256" "$blockchain_checksum_url"
     fi
   fi
   
@@ -8978,17 +8794,6 @@ import_from_github_container(){
     }
   fi
   
-  # Download container checksum (if separate file exists in old format)
-  if [[ -z "$sha256sums_url" ]] && [[ -n "$container_checksum_url" ]]; then
-    echo ""
-    echo "Downloading container image checksum (old format)..."
-    if [[ "$download_tool" == "curl" ]]; then
-      curl -sL -o "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
-    else
-      wget -q -O "$download_dir/${container_image_name}.sha256" "$container_checksum_url"
-    fi
-  fi
-  
   # Download VM image (if available)
   if [[ -n "$vm_image_url" ]]; then
     echo ""
@@ -9008,16 +8813,6 @@ import_from_github_container(){
       }
     fi
     
-    # Download VM checksum (if separate file exists in old format)
-    if [[ -z "$sha256sums_url" ]] && [[ -n "$vm_checksum_url" ]]; then
-      echo ""
-      echo "Downloading VM image checksum (old format)..."
-      if [[ "$download_tool" == "curl" ]]; then
-        curl -sL -o "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
-      else
-        wget -q -O "$download_dir/${vm_image_name}.sha256" "$vm_checksum_url"
-      fi
-    fi
   fi
   
   # Step 3: Verify blockchain parts
@@ -9083,50 +8878,6 @@ import_from_github_container(){
     fi
     
     cd - >/dev/null
-    
-  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
-    echo "Verifying blockchain parts (old format)..."
-    cd "$download_dir"
-    
-    local verify_failed=false
-    while IFS= read -r line; do
-      [[ "$line" =~ ^# ]] && continue  # Skip comments
-      [[ -z "$line" ]] && continue     # Skip empty lines
-      [[ ! "$line" =~ \.part[0-9][0-9] ]] && continue  # Skip non-part lines
-      
-      if ! echo "$line" | sha256sum -c --quiet 2>/dev/null; then
-        echo "    ✗ Checksum failed for: $(echo "$line" | awk '{print $2}')"
-        verify_failed=true
-      fi
-    done < "gm-blockchain.tar.gz.sha256"
-    
-    if [[ "$verify_failed" == "true" ]]; then
-      cd - >/dev/null
-      pause "❌ One or more blockchain parts failed checksum verification!"
-      return
-    fi
-    
-    echo "    ✓ All blockchain parts verified"
-    cd - >/dev/null
-    
-    # Verify container image (old format - separate file)
-    if [[ -f "$download_dir/${container_image_name}.sha256" ]]; then
-      echo ""
-      echo "Verifying container image (old format)..."
-      cd "$download_dir"
-      
-      if sha256sum -c "${container_image_name}.sha256" --quiet 2>/dev/null; then
-        echo "    ✓ Container image verified"
-      else
-        cd - >/dev/null
-        pause "❌ Container image checksum verification failed!"
-        return
-      fi
-      
-      cd - >/dev/null
-    else
-      echo "    ⚠ No container image checksum file (skipping verification)"
-    fi
   else
     echo "    ⚠ No checksum files found (skipping verification)"
   fi
@@ -9138,16 +8889,10 @@ import_from_github_container(){
   echo "═══════════════════════════════════════════════════════════════════════════════"
   echo ""
   
-  # Detect naming scheme (new: blockchain.tar.gz.part*, old: gm-blockchain.tar.gz.part*)
-  local blockchain_archive=""
+  # Reassemble blockchain from parts
   if ls "$download_dir"/blockchain.tar.gz.part* >/dev/null 2>&1; then
     cat "$download_dir"/blockchain.tar.gz.part* > "$download_dir/blockchain.tar.gz"
-    blockchain_archive="blockchain.tar.gz"
-    echo "✓ Blockchain reassembled (new naming)"
-  elif ls "$download_dir"/gm-blockchain.tar.gz.part* >/dev/null 2>&1; then
-    cat "$download_dir"/gm-blockchain.tar.gz.part* > "$download_dir/gm-blockchain.tar.gz"
-    blockchain_archive="gm-blockchain.tar.gz"
-    echo "✓ Blockchain reassembled (old naming)"
+    echo "✓ Blockchain reassembled"
   else
     pause "❌ No blockchain parts found to reassemble!"
     return
@@ -9159,7 +8904,7 @@ import_from_github_container(){
     echo "Verifying reassembled blockchain..."
     cd "$download_dir"
     
-    if grep -q "$blockchain_archive\$" "SHA256SUMS" 2>/dev/null; then
+    if grep -q "blockchain\.tar\.gz\$" "SHA256SUMS" 2>/dev/null; then
       if sha256sum -c SHA256SUMS --ignore-missing --quiet 2>/dev/null; then
         echo "    ✓ Reassembled blockchain verified"
       else
@@ -9172,32 +8917,8 @@ import_from_github_container(){
     fi
     
     cd - >/dev/null
-    
-  elif [[ -f "$download_dir/gm-blockchain.tar.gz.sha256" ]]; then
-    echo ""
-    echo "Verifying reassembled blockchain (old format)..."
-    cd "$download_dir"
-    
-    local reassembled_checksum=""
-    while IFS= read -r line; do
-      [[ "$line" =~ ^# ]] && continue
-      [[ -z "$line" ]] && continue
-      [[ "$line" =~ \.part[0-9][0-9] ]] && continue
-      reassembled_checksum="$line"
-      break
-    done < "gm-blockchain.tar.gz.sha256"
-    
-    if [[ -n "$reassembled_checksum" ]]; then
-      if echo "$reassembled_checksum" | sha256sum -c --quiet 2>/dev/null; then
-        echo "    ✓ Reassembled blockchain verified"
-      else
-        cd - >/dev/null
-        pause "❌ Reassembled blockchain checksum verification failed!"
-        return
-      fi
-    fi
-    
-    cd - >/dev/null
+  else
+    echo "    ⚠ No checksum files found (skipping verification)"
   fi
   
   # Step 5: Extract and import container image
@@ -9279,7 +9000,7 @@ import_from_github_container(){
   echo "Extracting blockchain archive..."
   local blockchain_extract_dir="$download_dir/blockchain-data"
   mkdir -p "$blockchain_extract_dir"
-  tar -xzf "$download_dir/$blockchain_archive" -C "$blockchain_extract_dir"
+  tar -xzf "$download_dir/blockchain.tar.gz" -C "$blockchain_extract_dir"
   
   # Inject blockchain into volume
   echo "Injecting blockchain into volume (this may take several minutes)..."

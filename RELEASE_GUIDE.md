@@ -67,9 +67,9 @@ Use the main script's export functionality:
   ├── blockchain.tar.gz.part02
   ├── blockchain.tar.gz.part03
   ├── ... (typically 11-12 parts, ~20GB total)
-  ├── vm-image-YYYYMMDD-HHMMSS.tar.gz (~1GB)
+  ├── vm-image.tar.gz (~1GB)
   │   OR
-  ├── container-image-YYYYMMDD-HHMMSS.tar.gz (~500MB)
+  ├── container-image.tar.gz (~500MB)
   ├── SHA256SUMS (checksums for all files above)
   └── MANIFEST.txt
 ```
@@ -165,63 +165,58 @@ git push origin v1.0.0
    ### Manual Import
    
    **Download files:**
-   - For VM: Download all `gm-blockchain.tar.gz.part*` + `gm-vm-image-*.tar.gz`
-   - For Container: Download all `gm-blockchain.tar.gz.part*` + `gm-container-image-*.tar.gz`
-   - Download all `.sha256` checksum files
+   - Download all `blockchain.tar.gz.part*` files
+   - Download either `vm-image.tar.gz` OR `container-image.tar.gz`
+   - Download `SHA256SUMS` checksum file
    
    **Verify and reassemble:**
    ```bash
-   # Verify blockchain parts
-   cd /path/to/downloads
-   sha256sum -c gm-blockchain.tar.gz.sha256
+   # Create unified export folder
+   mkdir gm-export-downloaded
+   cd gm-export-downloaded
    
-   # Reassemble blockchain
-   cat gm-blockchain.tar.gz.part* > gm-blockchain.tar.gz
+   # Move all downloaded files here
+   mv /path/to/downloads/blockchain.tar.gz.part* .
+   mv /path/to/downloads/vm-image.tar.gz .  # or container-image.tar.gz
+   mv /path/to/downloads/SHA256SUMS .
    
-   # Verify VM/container image
-   sha256sum -c gm-vm-image-*.tar.gz.sha256
-   # or
-   sha256sum -c gm-container-image-*.tar.gz.sha256
+   # Verify all files
+   sha256sum -c SHA256SUMS
    
-   # Move to Downloads and import
-   mv gm-blockchain-*.tar.gz ~/Downloads/
-   mv gm-vm-image-*.tar.gz ~/Downloads/
-   # or mv gm-container-image-*.tar.gz ~/Downloads/
+   # Move entire folder to Downloads for import
+   mv ../gm-export-downloaded ~/Downloads/
    
    # Import via garbageman-nm.sh → "Import from file"
    ```
    
-   See `RELEASE-MANIFEST.txt` for detailed instructions.
+   See `MANIFEST.txt` for detailed instructions.
    
    **Checksums:**
-   All files are SHA256 checksummed. The import process verifies integrity automatically.
+   All files are SHA256 checksummed in the unified SHA256SUMS file. The import process verifies integrity automatically.
    ```
 
 5. **Upload assets:**
 
-   Drag and drop or click to upload all files from the release directory:
+   Drag and drop or click to upload all files from the export directory:
    
    **Required files:**
-   - All `gm-blockchain.tar.gz.part*` files (11-12 parts)
-   - `gm-blockchain.tar.gz.sha256`
+   - All `blockchain.tar.gz.part*` files (11-12 parts)
+   - `SHA256SUMS` (unified checksums for all files)
    - `MANIFEST.txt`
-   - `RELEASE-MANIFEST.txt`
    
    **For VM release:**
-   - `gm-vm-image-YYYYMMDD-HHMMSS.tar.gz`
-   - `gm-vm-image-YYYYMMDD-HHMMSS.tar.gz.sha256`
+   - `vm-image.tar.gz`
    
    **For Container release:**
-   - `gm-container-image-YYYYMMDD-HHMMSS.tar.gz`
-   - `gm-container-image-YYYYMMDD-HHMMSS.tar.gz.sha256`
+   - `container-image.tar.gz`
    
    **For Both (recommended):**
-   - Upload all blockchain parts (shared)
+   - Upload all blockchain parts (shared between VM and container)
    - Upload both VM and container images
-   - Upload all checksums and manifests
+   - Upload SHA256SUMS and MANIFEST.txt
 
    **Upload tips:**
-   - GitHub supports bulk upload (drag entire folder)
+   - GitHub supports bulk upload (drag entire export folder)
    - All files are under 2GB (blockchain parts are 1.9GB each)
    - Total upload: ~21-22GB for both VM and container
    - Use a stable internet connection
@@ -269,10 +264,10 @@ You can release updated VM/container images without including blockchain data. U
 1. Run `./garbageman-nm.sh`
 2. Choose Export Base VM or Export Base Container
 3. Select **"Image-only export"** instead of full export
-4. Upload just the image file to GitHub release
+4. Upload the image file, SHA256SUMS, and MANIFEST.txt to GitHub release
 5. Document which previous release contains compatible blockchain
 
-**Note:** Users will need to download the image from your new release and blockchain parts from the referenced older release.
+**Note:** Users will need to download the image files from your new release and blockchain parts from the referenced older release.
 
 ## Troubleshooting
 
@@ -297,8 +292,8 @@ git push origin v1.0.0
 
 **Users report download issues:**
 - Verify all parts uploaded successfully
-- Check checksums match
-- Ensure `MANIFEST.txt` is included
+- Check SHA256SUMS file is included and valid
+- Ensure MANIFEST.txt is included
 - Test download yourself from clean environment
 
 ## Best Practices
@@ -320,19 +315,19 @@ git push origin v1.0.0
    - When major script updates occur
 
 4. **Verify checksums:**
-   - Always include `.sha256` files
+   - Always include SHA256SUMS file with all checksums
    - Test checksum verification yourself
    - Document verification steps in release notes
 
 5. **Provide clear instructions:**
-   - Explain unified folder format to users
+   - Explain unified export format to users
    - Document both VM and container import
    - Include reassembly steps in MANIFEST.txt
-   - Share entire folder for USB transfer use cases
+   - Share entire export folder for USB transfer use cases
 
 6. **Keep exports organized:**
    - One export folder per release
-   - All blockchain parts + image + checksums together
+   - All blockchain parts + image + checksums together in SHA256SUMS
    - Easy to copy entire folder to USB or backup
 
 ## Security Considerations
@@ -354,7 +349,7 @@ git push origin v1.0.0
 # Select: Full export (with blockchain)
 
 # Output created in ~/Downloads/gm-export-YYYYMMDD-HHMMSS/
-# Contains: blockchain.tar.gz.part01-XX + vm-image-*.tar.gz + SHA256SUMS + MANIFEST.txt
+# Contains: blockchain.tar.gz.part01-XX + vm-image.tar.gz + SHA256SUMS + MANIFEST.txt
 
 # 2. Create and push tag
 BLOCK_HEIGHT=921348
@@ -404,7 +399,7 @@ git push origin v2025.10.29.1
 # 3. Create release on GitHub
 # - Draft new release for v2025.10.29.1
 # - Note: "Image update only - use blockchain from v2025.10.29"
-# - Upload only the image file and its checksum
+# - Upload image file, SHA256SUMS, and MANIFEST.txt from export
 # - Users download this + blockchain parts from v2025.10.29
 ```
 
@@ -414,7 +409,7 @@ git push origin v2025.10.29.1
 - **What to name tags?** Date-based (`v2025.10.29`) recommended for clarity
 - **Delete old releases?** Keep last 2-3, delete older ones
 - **Pre-release vs release?** Use pre-release for testing, regular for stable
-- **VM or container or both?** Create separate releases for each (different tags)
+- **VM or container or both?** Recommended: Include both VM and container images in one release (shared blockchain)
 - **Can I update image without new blockchain?** Yes! Use image-only export
 - **What if GitHub changes?** Unified format makes it easy to host elsewhere or share via USB
 
@@ -422,10 +417,10 @@ git push origin v2025.10.29.1
 
 If you have existing monolithic releases (`gm-base-export-*.tar.gz`):
 
-1. **Keep old releases** - They still work with import system (backward compatible)
-2. **New releases use modular format** - Smaller, more flexible
-3. **Document format change** - In release notes, explain modular benefits
-4. **Gradual transition** - Users will naturally move to modular as they update
+1. **Old releases are deprecated** - Current script only supports unified format
+2. **New releases use unified format** - Smaller, more flexible, modular architecture
+3. **Document format change** - In release notes, explain unified format benefits
+4. **Users must upgrade** - Old format imports are no longer supported; users should use latest unified format releases
 
 ## Resources
 
