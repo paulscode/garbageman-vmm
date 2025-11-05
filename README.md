@@ -52,6 +52,8 @@ That's it! The script will:
 2. Show you a menu with clear options
 3. Guide you through each step
 
+---
+
 > **📝 Note:** This project was recently renamed from `Garbageman VM Manager` to `Garbageman Nodes Manager`. If you have used the tool before this change, rename your local folder so the above "Run It" command works:
 > ```bash
 > mv ~/garbageman-vmm ~/garbageman-nm
