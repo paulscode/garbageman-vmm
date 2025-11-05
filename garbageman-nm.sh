@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ################################################################################
-# garbageman-vmm.sh — All-in-one TUI for Garbageman lifecycle management
+# garbageman-nm.sh — All-in-one TUI for Garbageman lifecycle management
 #                     Supports both VMs and Containers
 #                     Tested on Linux Mint 22.2 (Ubuntu 24.04 base)
 #
@@ -59,7 +59,7 @@ set -euo pipefail
 # User-tunable defaults (override via environment variables)
 ################################################################################
 # These can be overridden before running the script, e.g.:
-#   VM_NAME=my-node VM_RAM_MB=4096 ./garbageman-vmm.sh
+#   VM_NAME=my-node VM_RAM_MB=4096 ./garbageman-nm.sh
 
 # Base VM identifier
 VM_NAME="${VM_NAME:-gm-base}"          # Name of the base VM (clones get unique names automatically)
@@ -452,7 +452,7 @@ install_docker() {
   echo ""
   echo "Important: Group membership changes require one of the following:"
   echo "  1. Log out and log back in (recommended for permanent effect)"
-  echo "  2. Run this script with: sg docker -c './garbageman-vmm.sh'"
+  echo "  2. Run this script with: sg docker -c './garbageman-nm.sh'"
   echo "  3. Continue with this session (will use sudo for docker operations)"
   echo ""
   
@@ -492,7 +492,7 @@ install_deps() {
   echo ""
   echo "Important: Group membership changes require one of the following:"
   echo "  1. Log out and log back in (recommended for permanent effect)"
-  echo "  2. Run this script with: sg libvirt -c './garbageman-vmm.sh'"
+  echo "  2. Run this script with: sg libvirt -c './garbageman-nm.sh'"
   echo "  3. Continue with this session (will use sudo for privileged operations)"
   echo ""
   
@@ -3098,7 +3098,7 @@ torcontrol=127.0.0.1:9051
 #   - Downloaded files preserved for USB transfer to other computers
 # Side effects: Downloads to ~/Downloads/gm-export-*, imports complete VM to libvirt
 import_from_github(){
-  local repo="paulscode/garbageman-vmm"
+  local repo="paulscode/garbageman-nm"
   local api_url="https://api.github.com/repos/$repo/releases"
   
   # Cleanup function for temporary files (called on both success and failure)
@@ -3665,6 +3665,18 @@ import_from_github(){
   
   echo "    ✓ Blockchain injected"
   
+  # Fix ownership - tar preserves UIDs which may not match the VM's bitcoin user
+  echo "    Fixing ownership of blockchain files..."
+  sudo virt-customize -a "$vm_disk" --no-selinux-relabel \
+    --run-command "chown -R bitcoin:bitcoin /var/lib/bitcoin" \
+    2>&1 | grep -v "random seed" >&2
+  
+  if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+    echo "    ✓ Ownership fixed"
+  else
+    echo "    ⚠ Warning: Failed to fix ownership (may cause startup issues)"
+  fi
+  
   # Step 7: Import VM into libvirt
   echo ""
   echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -4001,7 +4013,7 @@ stop() {
     echo "2. Check if default network is active: sudo virsh net-list --all"
     echo "3. Try restarting libvirtd: sudo systemctl restart libvirtd"
     echo "4. If you just installed packages, you may need to log out and back in"
-    echo "   Alternatively, run: sg libvirt -c './garbageman-vmm.sh'"
+    echo "   Alternatively, run: sg libvirt -c './garbageman-nm.sh'"
     die "Failed to create VM domain with virt-install. See troubleshooting above."
   fi
 
@@ -5124,7 +5136,7 @@ To Reassemble:
 
 cat blockchain.tar.gz.part* > blockchain.tar.gz
 
-Or let garbageman-vmm.sh handle it automatically via "Import from file"
+Or let garbageman-nm.sh handle it automatically via "Import from file"
 
 Files in this export:
 =====================
@@ -5385,8 +5397,8 @@ Download matching blockchain export with same timestamp:
 Import Instructions:
 ====================
 
-Method 1 (Recommended): Use garbageman-vmm.sh
-  ./garbageman-vmm.sh → Create Base VM → Import from file
+Method 1 (Recommended): Use garbageman-nm.sh
+  ./garbageman-nm.sh → Create Base VM → Import from file
   
   The script will automatically:
   1. Import the VM image
@@ -5562,7 +5574,7 @@ METADATA
   echo "   • Blockchain split for GitHub 2GB limit compatibility"
   echo ""
   echo "📤 To Import:"
-  echo "   Use 'Import from file' in garbageman-vmm.sh"
+  echo "   Use 'Import from file' in garbageman-nm.sh"
   echo "   The script will automatically combine both components"
   echo ""
   
@@ -8048,7 +8060,7 @@ To Reassemble:
 
 cat blockchain.tar.gz.part* > blockchain.tar.gz
 
-Or let garbageman-vmm.sh handle it automatically via "Import from file"
+Or let garbageman-nm.sh handle it automatically via "Import from file"
 
 Files in this export:
 =====================
@@ -8120,8 +8132,8 @@ The blockchain data is included in this export folder as split parts:
 Import Instructions:
 ====================
 
-Method 1 (Recommended): Use garbageman-vmm.sh
-  ./garbageman-vmm.sh → Create Base Container → Import from file
+Method 1 (Recommended): Use garbageman-nm.sh
+  ./garbageman-nm.sh → Create Base Container → Import from file
   
   The script will automatically:
   1. Import the container image
@@ -8256,7 +8268,7 @@ METADATA
   echo "   • Blockchain split for GitHub 2GB limit compatibility"
   echo ""
   echo "📤 To Import:"
-  echo "   Use 'Import from file' in garbageman-vmm.sh"
+  echo "   Use 'Import from file' in garbageman-nm.sh"
   echo "   The script will automatically combine both components"
   echo ""
   
@@ -8678,7 +8690,7 @@ torcontrol=127.0.0.1:9051
 #   - Downloaded files preserved for USB transfer to other computers
 # Side effects: Downloads to ~/Downloads/gm-export-*, imports complete container with volume
 import_from_github_container(){
-  local repo="paulscode/garbageman-vmm"
+  local repo="paulscode/garbageman-nm"
   local api_url="https://api.github.com/repos/$repo/releases"
   
   # Cleanup function for temporary files (called on both success and failure)
@@ -9446,7 +9458,7 @@ check_deployment_mode(){
   # Neither exists - prompt user
   local choice
   choice=$(whiptail --title "Choose Deployment Type" --menu \
-"Welcome to Garbageman VM Manager!
+"Welcome to Garbageman Nodes Manager!
 
 This tool helps you run Bitcoin Garbageman nodes for resisting
 spam in the Libre Relay network. You can deploy using either:
@@ -9459,7 +9471,7 @@ spam in the Libre Relay network. You can deploy using either:
   - Uses libvirt/qemu-kvm for VM management
   - Slower to start, but more stable on some systems
 
-⚠️  NOTE: Garbageman VMM is experimental software.
+⚠️  NOTE: Garbageman NM is experimental software.
 
 If you encounter issues with one method:
   1. Delete the base (via Manage menu)
@@ -9519,7 +9531,7 @@ Available after reserve: ${AVAIL_CORES} cores / ${AVAIL_RAM_MB} MiB
 Base VM exists: ${base_exists}"
 
     local choice
-    choice=$(whiptail --title "Garbageman VM Manager" --menu "$header\n\nChoose an action:" 24 92 10 \
+    choice=$(whiptail --title "Garbageman Nodes Manager" --menu "$header\n\nChoose an action:" 24 92 10 \
       1 "Create Base VM (${VM_NAME})" \
       2 "Monitor Base VM Sync (${VM_NAME})" \
       3 "Manage Base VM (${VM_NAME})" \

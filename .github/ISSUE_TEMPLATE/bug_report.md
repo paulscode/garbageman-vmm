@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a problem with Garbageman VMM
+about: Report a problem with Garbageman NM
 title: '[BUG] '
 labels: bug
 ---

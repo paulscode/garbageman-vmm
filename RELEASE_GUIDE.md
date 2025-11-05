@@ -1,6 +1,6 @@
 # GitHub Release Guide
 
-This guide explains how to create GitHub releases with pre-synced base VM and container exports for garbageman-vmm using the **unified export format**.
+This guide explains how to create GitHub releases with pre-synced base VM and container exports for garbageman-nm using the **unified export format**.
 
 ## Why Create Releases?
 
@@ -41,7 +41,7 @@ The unified export system keeps blockchain data and image files together in a si
 Use the main script's export functionality:
 
 ```bash
-./garbageman-vmm.sh
+./garbageman-nm.sh
 ```
 
 **For VM releases:**
@@ -106,7 +106,7 @@ git push origin v1.0.0
 
 1. **Go to releases page:**
    ```
-   https://github.com/paulscode/garbageman-vmm/releases
+   https://github.com/paulscode/garbageman-nm/releases
    ```
 
 2. **Click "Draft a new release"**
@@ -138,7 +138,7 @@ git push origin v1.0.0
    - ✅ VM image (~1GB) - Alpine Linux 3.18 + Bitcoin Knots
    - ✅ Container image (~500MB) - Alpine Linux + Bitcoin Knots
    - ✅ All files SHA256 checksummed
-   - ✅ Automatic reassembly and import via garbageman-vmm.sh
+   - ✅ Automatic reassembly and import via garbageman-nm.sh
    
    **Modular Benefits:**
    - Smaller downloads (get only what you need)
@@ -151,13 +151,13 @@ git push origin v1.0.0
    ### Automatic Import (Recommended)
    
    **For VM:**
-   1. Run `./garbageman-vmm.sh`
+   1. Run `./garbageman-nm.sh`
    2. Choose "Create Base VM" → "Import from GitHub"
    3. Select this release
    4. Script downloads blockchain + VM image, verifies checksums, and assembles automatically
    
    **For Container:**
-   1. Run `./garbageman-vmm.sh`
+   1. Run `./garbageman-nm.sh`
    2. Choose "Create Base Container" → "Import from GitHub"
    3. Select this release
    4. Script downloads blockchain + container image, verifies, and assembles automatically
@@ -188,7 +188,7 @@ git push origin v1.0.0
    mv gm-vm-image-*.tar.gz ~/Downloads/
    # or mv gm-container-image-*.tar.gz ~/Downloads/
    
-   # Import via garbageman-vmm.sh → "Import from file"
+   # Import via garbageman-nm.sh → "Import from file"
    ```
    
    See `RELEASE-MANIFEST.txt` for detailed instructions.
@@ -240,7 +240,7 @@ After publishing, test the import:
 
 **Test VM import:**
 ```bash
-./garbageman-vmm.sh
+./garbageman-nm.sh
 # Choose: Create Base VM → Import from GitHub
 # Select your new release
 # Verify it downloads, verifies checksums, and imports correctly
@@ -248,7 +248,7 @@ After publishing, test the import:
 
 **Test Container import:**
 ```bash
-./garbageman-vmm.sh
+./garbageman-nm.sh
 # Choose: Create Base Container → Import from GitHub
 # Select your new release
 # Verify container import works correctly
@@ -266,7 +266,7 @@ After publishing, test the import:
 You can release updated VM/container images without including blockchain data. Users would use blockchain from a previous release:
 
 **From main script:**
-1. Run `./garbageman-vmm.sh`
+1. Run `./garbageman-nm.sh`
 2. Choose Export Base VM or Export Base Container
 3. Select **"Image-only export"** instead of full export
 4. Upload just the image file to GitHub release
@@ -349,7 +349,7 @@ git push origin v1.0.0
 
 ```bash
 # 1. Run main script and export
-./garbageman-vmm.sh
+./garbageman-nm.sh
 # Choose: Export Base VM
 # Select: Full export (with blockchain)
 
@@ -362,7 +362,7 @@ git tag -a v2025.10.29 -m "Release 2025.10.29 - Block $BLOCK_HEIGHT"
 git push origin v2025.10.29
 
 # 3. Create release on GitHub
-# - Go to https://github.com/paulscode/garbageman-vmm/releases
+# - Go to https://github.com/paulscode/garbageman-nm/releases
 # - Click "Draft a new release"
 # - Select tag v2025.10.29
 # - Add description with block height and format details
@@ -370,7 +370,7 @@ git push origin v2025.10.29
 # - Publish
 
 # 4. Test import
-./garbageman-vmm.sh
+./garbageman-nm.sh
 # Create Base VM → Import from GitHub → Select v2025.10.29
 
 # 5. Announce
@@ -382,7 +382,7 @@ git push origin v2025.10.29
 
 ```bash
 # 1. Export container with blockchain
-./garbageman-vmm.sh
+./garbageman-nm.sh
 # Choose: Export Base Container
 # Select: Full export (with blockchain)
 
@@ -393,7 +393,7 @@ git push origin v2025.10.29
 
 ```bash
 # 1. Export just the image
-./garbageman-vmm.sh
+./garbageman-nm.sh
 # Choose: Export Base VM (or Container)
 # Select: Image-only export
 

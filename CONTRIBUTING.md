@@ -1,4 +1,4 @@
-# Contributing to Garbageman VMM
+# Contributing to Garbageman NM
 
 Thanks for your interest in contributing! This project helps manage Bitcoin Garbageman nodes in isolated VMs.
 

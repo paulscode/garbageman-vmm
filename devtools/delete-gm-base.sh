@@ -380,7 +380,7 @@ if [[ "$MODE" == "both" || "$MODE" == "container" ]]; then
 fi
 echo ""
 echo "To recreate, run:"
-echo "  ./garbageman-vmm.sh"
+echo "  ./garbageman-nm.sh"
 if [[ "$MODE" == "both" ]]; then
     echo "  Then choose 'Create Base VM' or 'Create Base Container'"
 elif [[ "$MODE" == "vm" ]]; then

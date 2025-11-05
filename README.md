@@ -1,4 +1,4 @@
-# Garbageman VM Manager
+# Garbageman Nodes Manager
 
 **Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes on Linux**
 
@@ -38,13 +38,13 @@ This script makes it **dead simple** (in theory) to:
 ```bash
 sudo apt-get install -y git
 cd ~
-git clone https://github.com/paulscode/garbageman-vmm.git
+git clone https://github.com/paulscode/garbageman-nm.git
 ```
 
 ### 2. Run It!
 
 ```bash
-cd ~/garbageman-vmm && git pull && ./garbageman-vmm.sh
+cd ~/garbageman-nm && git pull && ./garbageman-nm.sh
 ```
 
 That's it! The script will:
@@ -473,7 +473,7 @@ The script displays different menus depending on whether you're using Containers
 **VM Mode:**
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│ Garbageman VM Manager                                                                   │
+│ Garbageman Nodes Manager                                                                │
 │                                                                                         │
 │ Deployment: VMs (libvirt/qemu)                                                          │
 │ Host: 8 cores / 24032 MiB   |   Reserve: 2 cores / 4096 MiB                             │
@@ -695,7 +695,7 @@ Yes! Use the built-in modular export feature:
 If you want to share your synced base container/VM as a GitHub release:
 
 1. **Export from main script:**
-   - Run the main script: `./garbageman-vmm.sh`
+   - Run the main script: `./garbageman-nm.sh`
    - For Containers: Choose **"Export Base Container"**
    - For VMs: Choose **"Export Base VM"**
    - Select export type:
@@ -711,7 +711,7 @@ If you want to share your synced base container/VM as a GitHub release:
    ```
 
 3. **Upload to GitHub:**
-   - Go to https://github.com/paulscode/garbageman-vmm/releases
+   - Go to https://github.com/paulscode/garbageman-nm/releases
    - Click "Draft a new release"
    - Select your tag
    - Upload all files from the export directory:
@@ -1012,14 +1012,14 @@ curl https://icanhazip.com
 docker stop gm-base ; docker rm gm-base
 docker volume rm garbageman-data
 docker system prune -f
-./garbageman-vmm.sh  # Start fresh
+./garbageman-nm.sh  # Start fresh
 ```
 
 **For VMs:**
 ```bash
 sudo rm -f /var/lib/libvirt/images/gm-base.qcow2
 virsh undefine gm-base
-./garbageman-vmm.sh  # Start fresh
+./garbageman-nm.sh  # Start fresh
 ```
 
 ### Can't SSH into VM
@@ -1073,24 +1073,24 @@ Customize script behavior before running:
 
 ```bash
 # Use different base name
-VM_NAME=my-bitcoin-node ./garbageman-vmm.sh           # For VMs
-CONTAINER_NAME=my-bitcoin-node ./garbageman-vmm.sh    # For Containers
+VM_NAME=my-bitcoin-node ./garbageman-nm.sh           # For VMs
+CONTAINER_NAME=my-bitcoin-node ./garbageman-nm.sh    # For Containers
 
 # Change default runtime resources
-VM_VCPUS=2 VM_RAM_MB=4096 ./garbageman-vmm.sh                    # For VMs
-CONTAINER_RUNTIME_CPUS=2 CONTAINER_RUNTIME_RAM=4096 ./garbageman-vmm.sh  # For Containers
+VM_VCPUS=2 VM_RAM_MB=4096 ./garbageman-nm.sh                    # For VMs
+CONTAINER_RUNTIME_CPUS=2 CONTAINER_RUNTIME_RAM=4096 ./garbageman-nm.sh  # For Containers
 
 # Change disk size (VMs only, containers use volumes)
-VM_DISK_GB=50 ./garbageman-vmm.sh
+VM_DISK_GB=50 ./garbageman-nm.sh
 
 # Force Tor-only on base container/VM
-CLEARNET_OK=no ./garbageman-vmm.sh
+CLEARNET_OK=no ./garbageman-nm.sh
 ```
 
 ### Using a Different Garbageman Branch
 
 ```bash
-GM_BRANCH=my-custom-branch ./garbageman-vmm.sh
+GM_BRANCH=my-custom-branch ./garbageman-nm.sh
 ```
 
 ### Diagnostic Tools
