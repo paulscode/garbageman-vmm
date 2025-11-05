@@ -3109,6 +3109,9 @@ import_from_github(){
     # Remove temporary files (keep original downloads for USB transfer)
     rm -f "$dir"/blockchain.tar.gz "$dir"/gm-blockchain.tar.gz 2>/dev/null
     rm -rf "$dir/blockchain-data" "$dir/vm-image" 2>/dev/null
+    
+    # Clean up blockchain decompression temp directory if it exists
+    rm -rf "$HOME"/.cache/gm-blockchain-temp-* 2>/dev/null
   }
   
   echo ""
@@ -3635,16 +3638,30 @@ import_from_github(){
   echo "═══════════════════════════════════════════════════════════════════════════════"
   echo ""
   
-  echo "Extracting blockchain archive..."
-  local blockchain_extract_dir="$download_dir/blockchain-data"
-  mkdir -p "$blockchain_extract_dir"
-  tar -xzf "$download_dir/$blockchain_archive" -C "$blockchain_extract_dir"
+  # Decompress blockchain archive first (virt-tar-in requires uncompressed tar)
+  echo "Decompressing blockchain archive..."
+  local blockchain_temp="$HOME/.cache/gm-blockchain-temp-$$"
+  mkdir -p "$blockchain_temp"
+  cp "$download_dir/$blockchain_archive" "$blockchain_temp/"
+  
+  if ! gunzip "$blockchain_temp/$blockchain_archive"; then
+    rm -rf "$blockchain_temp"
+    pause "❌ Failed to decompress blockchain archive"
+    return
+  fi
+  
+  # Get the decompressed tar filename (remove .gz extension)
+  local tar_file="$blockchain_temp/${blockchain_archive%.gz}"
   
   echo "Injecting blockchain into VM disk (this may take several minutes)..."
-  sudo virt-tar-in -a "$vm_disk" "$blockchain_extract_dir" /var/lib/bitcoin || {
+  sudo virt-tar-in -a "$vm_disk" "$tar_file" /var/lib/bitcoin || {
+    rm -rf "$blockchain_temp"
     pause "❌ Failed to inject blockchain data into VM disk"
     return
   }
+  
+  # Cleanup temporary files
+  rm -rf "$blockchain_temp"
   
   echo "    ✓ Blockchain injected"
   
@@ -3661,13 +3678,26 @@ import_from_github(){
   sudo cp "$vm_disk" "$final_disk_path"
   sudo chown libvirt-qemu:kvm "$final_disk_path"
   
+  # Update XML with correct VM name and disk path
+  echo "Updating VM definition..."
+  local temp_xml="/tmp/gm-import-$$.xml"
+  cp "$vm_xml" "$temp_xml"
+  
+  # Update VM name
+  sed -i "s|<name>.*</name>|<name>$VM_NAME</name>|" "$temp_xml"
+  
+  # Update disk path
+  sed -i "s|<source file='[^']*'/>|<source file='$final_disk_path'/>|" "$temp_xml"
+  
   # Import VM definition
   echo "Importing VM definition..."
-  sudo virsh define "$vm_xml" || {
+  sudo virsh define "$temp_xml" || {
+    rm -f "$temp_xml"
     pause "❌ Failed to import VM definition"
     return
   }
   
+  rm -f "$temp_xml"
   echo "    ✓ VM imported successfully"
   
   echo ""
