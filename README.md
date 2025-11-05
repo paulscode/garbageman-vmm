@@ -1,6 +1,6 @@
 # Garbageman Nodes Manager
 
-**Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes on Linux**
+**Easy (hopefully!) setup for running multiple Bitcoin Garbageman nodes**
 
 Run as many Garbageman (a Bitcoin Knots fork) nodes as your computer can handle, each with its own Tor hidden service for maximum privacy. Choose between **Containers** (Docker/Podman) for lightweight efficiency or **Virtual Machines** (VMs) for greater stability on some systems.
 
@@ -26,7 +26,7 @@ This script makes it **dead simple** (in theory) to:
 
 **No manual configuration needed** - the script handles everything from building the software to setting up Tor networking.
 
-<img width="1024" height="1255" alt="image" src="https://github.com/user-attachments/assets/da188a73-750d-44df-8555-2a5d08f5f413" />
+<img width="1024" height="1255" alt="image" src="https://github.com/user-attachments/assets/18410a85-0616-4c2d-9025-50d1cdb32433" />
 
 
 ---
