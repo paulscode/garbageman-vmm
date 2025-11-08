@@ -1,0 +1,117 @@
+# ==============================================================================
+# Caddy Configuration - Garbageman WebUI TLS/HTTPS
+# ==============================================================================
+# Provides optional HTTPS support for standalone deployments
+#
+# DEPLOYMENT OPTIONS:
+#
+# 1. Local Development (localhost with self-signed cert):
+#    - Use the configuration below as-is
+#    - Access: https://localhost
+#    - Browser will show certificate warning (expected for self-signed)
+#
+# 2. Production with Domain Name (automatic Let's Encrypt):
+#    - Replace "localhost" with your domain: "yourdomain.com"
+#    - Ensure ports 80/443 are accessible from internet
+#    - Caddy automatically obtains and renews Let's Encrypt certificates
+#
+# 3. Production with Custom Certificates:
+#    - Use the "tls /path/to/cert.pem /path/to/key.pem" directive
+#    - Mount your certificate files into the Caddy container
+#
+# NOTE: Wrapper deployments (Start9/Umbrel) do NOT need this file.
+#       Wrappers handle TLS at their own reverse proxy layer.
+# ==============================================================================
+
+# Replace "localhost" with your domain name for production deployments
+# Example: garbageman.example.com
+localhost {
+	# Automatic HTTPS with self-signed cert for localhost
+	# For production domains, Caddy automatically uses Let's Encrypt
+
+	# Reverse proxy to WebUI frontend
+	handle /* {
+		reverse_proxy webui-ui:5173 {
+			# Health check to ensure UI is responsive
+			health_uri /
+			health_interval 30s
+			health_timeout 10s
+		}
+	}
+
+	# Reverse proxy to API backend
+	handle /api/* {
+		reverse_proxy webui-api:8080 {
+			# Health check using the dedicated health endpoint
+			health_uri /api/health
+			health_interval 30s
+			health_timeout 10s
+		}
+	}
+
+	# Security headers
+	header {
+		# Enable HSTS (HTTP Strict Transport Security)
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+		# Prevent clickjacking
+		X-Frame-Options "SAMEORIGIN"
+
+		# Prevent MIME type sniffing
+		X-Content-Type-Options "nosniff"
+
+		# Enable browser XSS protection
+		X-XSS-Protection "1; mode=block"
+
+		# Referrer policy
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# Remove server header
+		-Server
+	}
+
+	# Logging
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 100mb
+			roll_keep 10
+		}
+		format json
+		level INFO
+	}
+}
+
+# ==============================================================================
+# PRODUCTION EXAMPLE (Let's Encrypt with automatic HTTPS)
+# ==============================================================================
+# Uncomment and configure for production deployments:
+#
+# garbageman.yourdomain.com {
+#     # Caddy automatically obtains Let's Encrypt certificates
+#     
+#     # Optional: Set your email for Let's Encrypt notifications
+#     # tls your-email@example.com
+#     
+#     handle /* {
+#         reverse_proxy webui-ui:5173
+#     }
+#     
+#     handle /api/* {
+#         reverse_proxy webui-api:8080
+#     }
+#     
+#     # Same security headers as above
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-Content-Type-Options "nosniff"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#         -Server
+#     }
+#     
+#     log {
+#         output file /var/log/caddy/access.log
+#         format json
+#     }
+# }

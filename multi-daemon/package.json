@@ -1,0 +1,17 @@
+{
+  "name": "garbageman-multi-daemon",
+  "version": "0.1.0",
+  "description": "Multi-daemon supervisor for Garbageman Nodes Manager",
+  "type": "module",
+  "scripts": {
+    "start": "tsx supervisor.stub.ts",
+    "dev": "tsx watch supervisor.stub.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0"
+  }
+}

@@ -1,0 +1,211 @@
+# ==============================================================================
+# Docker Compose - Garbageman WebUI Development Environment
+# ==============================================================================
+# Three-container setup: multi-daemon supervisor, API server, UI frontend
+#
+# Usage:
+#   docker compose -f devtools/compose.webui.yml up --build
+#   docker compose -f devtools/compose.webui.yml down
+#
+# Access:
+#   UI:         http://localhost:5173
+#   API:        http://localhost:8080
+#   Supervisor: http://localhost:9000
+
+services:
+  # ============================================================================
+  # Tor SOCKS5 Proxy
+  # ============================================================================
+  # Provides Tor connectivity for peer discovery
+  
+  tor-proxy:
+    image: dperson/torproxy:latest
+    container_name: gm-tor-proxy
+    networks:
+      - garbageman-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--socks5-hostname", "localhost:9050", "-f", "http://check.torproject.org/"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+
+  # ============================================================================
+  # Multi-Daemon Supervisor (Stub)
+  # ============================================================================
+  # Simulates multiple daemon instances with fake metrics
+  
+  multi-daemon:
+    build:
+      context: ../multi-daemon
+      dockerfile: Dockerfile
+    container_name: gm-multi-daemon
+    ports:
+      - "9000:9000"
+    environment:
+      SUPERVISOR_PORT: 9000
+      DATA_DIR: /data/bitcoin
+      ARTIFACTS_DIR: /app/.artifacts
+    volumes:
+      - multi-daemon-data:/data/bitcoin
+      - multi-daemon-artifacts:/app/.artifacts
+      - ../envfiles:/envfiles
+    networks:
+      - garbageman-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================================
+  # WebUI API Server
+  # ============================================================================
+  # Fastify REST API for managing instance definitions
+  
+  webui-api:
+    build:
+      context: ../webui/api
+      dockerfile: Dockerfile
+    container_name: gm-webui-api
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      HOST: "0.0.0.0"
+      ENVFILES_DIR: /envfiles
+      SUPERVISOR_URL: http://multi-daemon:9000
+      LOG_LEVEL: info
+      # Set to 'production' to disable test data endpoints for security
+      NODE_ENV: development
+      # Tor SOCKS5 proxy (containerized)
+      TOR_PROXY_HOST: tor-proxy
+      TOR_PROXY_PORT: 9050
+    volumes:
+      # Mount envfiles directory (read/write)
+      - ../envfiles:/envfiles
+      # Share artifacts with multi-daemon container
+      - multi-daemon-artifacts:/app/.artifacts
+      # Share data directory with multi-daemon for blockchain extraction
+      - multi-daemon-data:/data/bitcoin
+      # Mount source code for hot-reload in dev mode
+      - ../webui/api/src:/app/src:ro
+    networks:
+      - garbageman-net
+    depends_on:
+      tor-proxy:
+        condition: service_healthy
+      multi-daemon:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ============================================================================
+  # WebUI Frontend
+  # ============================================================================
+  # Next.js application with dark neon war room UI
+  
+  webui-ui:
+    build:
+      context: ../webui/ui
+      dockerfile: Dockerfile
+      target: deps  # Use deps stage for dev mode
+    container_name: gm-webui-ui
+    command: npm run dev
+    ports:
+      - "5173:5173"
+    environment:
+      PORT: 5173
+      HOSTNAME: "0.0.0.0"
+      NEXT_PUBLIC_API_BASE: http://localhost:8080
+      # Server-side API URL for Next.js rewrites (container-to-container)
+      API_BASE_URL: http://webui-api:8080
+      NODE_ENV: development
+    volumes:
+      # Mount source code for hot-reload in dev mode
+      - ../webui/ui:/app
+      - /app/node_modules  # Prevent overwriting node_modules
+      - /app/.next  # Prevent overwriting .next
+    networks:
+      - garbageman-net
+    depends_on:
+      - webui-api
+    restart: unless-stopped
+
+  # ============================================================================
+  # Caddy Reverse Proxy (Optional - TLS/HTTPS)
+  # ============================================================================
+  # OPTIONAL: Enable this service for HTTPS support in standalone deployments
+  # 
+  # When enabled, Caddy provides:
+  # - Automatic HTTPS with self-signed certs for localhost
+  # - Let's Encrypt automatic certificate management for production domains
+  # - Reverse proxy to webui-ui and webui-api
+  # 
+  # To enable:
+  # 1. Uncomment this service block
+  # 2. Edit Caddyfile with your domain name (or keep localhost for dev)
+  # 3. Run: docker compose -f devtools/compose.webui.yml up caddy
+  # 
+  # Access when enabled:
+  #   UI:  https://localhost (or https://yourdomain.com)
+  #   API: https://localhost/api (or https://yourdomain.com/api)
+  # 
+  # NOTE: Wrapper deployments (Start9/Umbrel) should NOT use this service.
+  #       Wrappers handle TLS at their own reverse proxy layer.
+
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: gm-caddy
+  #   ports:
+  #     - "443:443"    # HTTPS
+  #     - "80:80"      # HTTP (redirects to HTTPS)
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   networks:
+  #     - garbageman-net
+  #   depends_on:
+  #     - webui-ui
+  #     - webui-api
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 10s
+
+# ==============================================================================
+# Networks
+# ==============================================================================
+
+networks:
+  garbageman-net:
+    driver: bridge
+    name: garbageman-network
+
+# ==============================================================================
+# Volumes
+# ==============================================================================
+# Persist daemon data and artifacts across container restarts
+
+volumes:
+  multi-daemon-data:
+    name: gm-multi-daemon-data
+  multi-daemon-artifacts:
+    name: gm-multi-daemon-artifacts
+  # Caddy volumes (used only if caddy service is enabled)
+  caddy-data:
+    name: gm-caddy-data
+  caddy-config:
+    name: gm-caddy-config

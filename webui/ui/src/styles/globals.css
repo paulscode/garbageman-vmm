@@ -1,0 +1,278 @@
+/**
+ * Global Styles - Garbageman Nodes Manager WebUI
+ * ================================================
+ * Dark neon war room aesthetic with radioactive accents.
+ * 
+ * Layers:
+ *  1. Tailwind base, components, utilities
+ *  2. Design tokens (tokens.css)
+ *  3. Global resets and base styles
+ *  4. Focus-visible styles for accessibility
+ */
+
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+ * BASE LAYER - Resets and Foundation
+ * ============================================================================ */
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  
+  html {
+    @apply antialiased;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  
+  body {
+    @apply bg-bg0 text-tx1;
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+  }
+  
+  /* Monospace for code and technical data */
+  code,
+  pre,
+  kbd,
+  samp {
+    font-family: var(--font-mono);
+  }
+  
+  /* Headings */
+  h1, h2, h3, h4, h5, h6 {
+    @apply text-tx0 font-semibold;
+    line-height: var(--leading-tight);
+  }
+  
+  h1 {
+    font-size: var(--text-4xl);
+  }
+  
+  h2 {
+    font-size: var(--text-3xl);
+  }
+  
+  h3 {
+    font-size: var(--text-2xl);
+  }
+  
+  h4 {
+    font-size: var(--text-xl);
+  }
+  
+  /* Links */
+  a {
+    @apply text-accent underline-offset-4 transition-colors;
+    text-decoration: none;
+  }
+  
+  a:hover {
+    @apply text-accent-bright underline;
+  }
+  
+  /* Selection */
+  ::selection {
+    background: rgba(255, 107, 53, 0.3);
+    color: var(--tx0);
+  }
+  
+  /* Scrollbar styling (webkit browsers) */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: var(--bg1);
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: var(--bg3);
+    border-radius: var(--radius-sm);
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--acc-orange-dim);
+  }
+}
+
+/* ============================================================================
+ * FOCUS-VISIBLE STYLES
+ * Accessible keyboard navigation with neon orange outlines
+ * Do NOT rely solely on glow for focus indication
+ * ============================================================================ */
+
+@layer base {
+  *:focus {
+    outline: none;
+  }
+  
+  *:focus-visible {
+    outline: 2px solid var(--acc-orange);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+  
+  /* Button-specific focus (tighter outline) */
+  button:focus-visible,
+  a:focus-visible {
+    outline-offset: 1px;
+  }
+}
+
+/* ============================================================================
+ * COMPONENT LAYER - Reusable Patterns
+ * ============================================================================ */
+
+@layer components {
+  /* Card base */
+  .card {
+    @apply bg-bg1 border rounded-md p-6;
+    border: var(--border-default);
+  }
+  
+  .card:hover {
+    border: var(--border-bright);
+  }
+  
+  /* Button base */
+  .btn {
+    @apply inline-flex items-center justify-center px-4 py-2 rounded-md;
+    @apply font-medium text-sm transition-all;
+    @apply bg-bg2 text-tx0 border;
+    border: var(--border-default);
+  }
+  
+  .btn:hover {
+    @apply bg-bg3;
+    border: var(--border-bright);
+  }
+  
+  .btn:active {
+    @apply scale-95;
+  }
+  
+  .btn-primary {
+    @apply bg-accent text-bg0 border-accent;
+  }
+  
+  .btn-primary:hover {
+    @apply bg-accent-bright;
+  }
+  
+  /* Badge */
+  .badge {
+    @apply inline-flex items-center px-2 py-1 text-xs font-medium rounded;
+    @apply bg-bg2 text-tx1 border;
+    border: var(--border-subtle);
+  }
+  
+  /* Input */
+  .input {
+    @apply w-full px-3 py-2 rounded-md bg-bg2 text-tx0 border;
+    @apply transition-colors;
+    border: var(--border-default);
+  }
+  
+  .input:focus {
+    border: var(--border-bright);
+  }
+  
+  .input::placeholder {
+    @apply text-tx3;
+  }
+}
+
+/* ============================================================================
+ * UTILITY LAYER - Custom Utilities
+ * ============================================================================ */
+
+@layer utilities {
+  /* Text gradients (for headings) */
+  .text-gradient-orange {
+    background: linear-gradient(135deg, var(--acc-orange), var(--acc-orange-bright));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  
+  .text-gradient-green {
+    background: linear-gradient(135deg, var(--acc-green), var(--acc-green-bright));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  
+  /* Status indicators - text only */
+  .status-up {
+    color: var(--acc-green);
+  }
+  
+  .status-exited {
+    color: var(--tx3);
+  }
+  
+  .status-warning {
+    color: var(--acc-amber);
+  }
+  
+  .status-error {
+    color: var(--acc-red);
+  }
+  
+  /* Status indicator dots - background color for dots */
+  .status-dot.status-up {
+    background-color: var(--acc-green);
+  }
+  
+  .status-dot.status-exited {
+    background-color: var(--tx3);
+  }
+  
+  .status-dot.status-warning {
+    background-color: var(--acc-amber);
+  }
+  
+  .status-dot.status-error {
+    background-color: var(--acc-red);
+  }
+  
+  /* Animation utilities */
+  .animate-pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+  
+  @keyframes pulse-glow {
+    0%, 100% {
+      opacity: 1;
+      box-shadow: 0 0 4px currentColor, 0 0 8px currentColor;
+    }
+    50% {
+      opacity: 0.8;
+      box-shadow: 0 0 8px currentColor, 0 0 16px currentColor, 0 0 24px currentColor;
+    }
+  }
+  
+  .animate-scan-in {
+    animation: scan-in 0.6s var(--ease-out) forwards;
+  }
+  
+  @keyframes scan-in {
+    0% {
+      opacity: 0;
+      transform: translateY(20px) scaleY(0.95);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scaleY(1);
+    }
+  }
+}

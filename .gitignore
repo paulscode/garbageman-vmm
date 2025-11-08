@@ -1,13 +1,41 @@
 # ----- OS / Editor junk -----
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
 Thumbs.db
-*.swp
-*.swo
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
 *~
+.directory
+
+# IDEs
 .vscode/
 .idea/
 *.code-workspace
 *.iml
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+.loadpath
+.buildpath
+nbproject/
+.nb-gradle/
 
 # ----- Backup files -----
 *.backup
@@ -24,19 +52,91 @@ logs/
 
 # ----- Env / secrets (if you ever add them) -----
 .env
-.env.* 
+.env.*
+!.env.example
 *.secret
 *.key
 *.pem
+*.crt
+*.p12
+*.pfx
+
+# ----- Node.js / JavaScript / TypeScript -----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+*.tsbuildinfo
+*.tgz
+package-lock.json.bak
+
+# Next.js
+.next/
+out/
+.vercel
+
+# Build outputs
+dist/
+build/
+*.local
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# TypeScript cache
+*.tsbuildinfo
+.tsbuildinfo
 
 # ----- Build outputs (host-side Garbageman build) -----
 # If you build Garbageman in the repo (default is $HOME/src/garbageman)
-src/
-**/build/
+# Note: Only exclude root-level src/, not webui/*/src/
+/src/
 **/CMakeFiles/
 **/CMakeCache.txt
 **/cmake_install.cmake
 **/Makefile
+
+# ----- Runtime data / Instance files -----
+# Instance configuration and data
+envfiles/instances/
+webui/.envfiles/
+# But keep the envfiles directory structure and GLOBAL.env template
+!envfiles/
+!envfiles/GLOBAL.env
+# Blockchain artifacts and binaries
+.artifacts/
+webui/.artifacts/
+*.dat
+*.blk
+
+# Discovered peers data (runtime)
+discovered-peers.json
+
+# ----- Docker / Container artifacts -----
+.dockerignore.bak
+docker-compose.override.yml
+
+# ----- Caddy reverse proxy data (TLS certificates, private keys) -----
+# These are stored in Docker volumes by default, but protect against
+# accidental commits if someone mounts host directories
+caddy-data/
+caddy-config/
+.caddy/
+caddy/data/
+caddy/config/
+# Caddy logs may contain IPs and request patterns
+caddy/logs/
+caddy.log
+access.log
+# Local Caddyfile overrides (if users add sensitive config)
+Caddyfile.local
+**/Caddyfile.local
+*.caddy.local
 
 # ----- Script caches & artifacts -----
 # Binaries staged by the TUI for guest injection

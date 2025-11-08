@@ -1,1253 +1,1148 @@
 # Garbageman Nodes Manager
 
-**Easy (hopefully!) setup for running multiple Bitcoin nodes (Garbageman or Bitcoin Knots)**
+**Modern web-based control plane for managing multiple Bitcoin nodes with privacy-first design**
 
-Run as many Bitcoin nodes as your computer can handle, with a choice between **Garbageman** (a Bitcoin Knots fork with Libre Relay spam prevention) or standard **Bitcoin Knots**. Each node gets its own Tor hidden service for maximum privacy. Choose between **Containers** (Docker/Podman) for lightweight efficiency or **Virtual Machines** (VMs) for greater stability on some systems.
+Run Bitcoin nodes (Garbageman or Bitcoin Knots) with an intuitive web interface featuring real-time monitoring, peer discovery, and artifact management. Each node gets its own Tor hidden service for maximum privacy. Built for embedded platforms like Start9 and Umbrel, as well as traditional server deployments.
 
 <img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/6af100e5-c873-4c26-b848-6a5ecdf17dbc" />
 
-
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Linux%20Mint%2022.2-green.svg)
+![Platform](https://img.shields.io/badge/platform-Linux-green.svg)
+![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
 
 ---
 
 ## 🎯 What This Does
 
-This script makes it **dead simple** (in theory) to:
+Garbageman NM provides **two complementary tools** for running Bitcoin nodes:
 
-- ✅ Create a lightweight Bitcoin node (Garbageman or Bitcoin Knots) in a container **or** VM
-- ✅ Choose your node implementation: Garbageman (Libre Relay spam prevention) or Bitcoin Knots
-- ✅ Choose between Containers (lightweight, faster) or VMs (more stable on some systems)
-- ✅ Monitor the Initial Block Download (IBD) sync with a live progress display
-- ✅ Clone your synced node multiple times for redundancy
-- ✅ Each clone gets its own unique Tor `.onion` address (privacy-first!)
-- ✅ Export and transfer containers/VMs securely between systems
-- ✅ Automatically manage resources (CPU/RAM/Disk) so your system stays responsive
+### 🖥️ WebUI (Primary Interface)
 
-**No manual configuration needed** - the script handles everything from building the software to setting up Tor networking.
+A modern, containerized web application for managing multiple Bitcoin daemon instances:
 
-<img width="1024" height="1255" alt="image" src="https://github.com/user-attachments/assets/18410a85-0616-4c2d-9025-50d1cdb32433" />
+- ✅ **Web-based dashboard** - Dark neon aesthetic with real-time updates
+- ✅ **Instance management** - Create, start, stop, monitor multiple daemon instances
+- ✅ **Real-time monitoring** - Block height, peer counts, sync progress, resource usage
+- ✅ **Peer discovery** - Clearnet DNS seeds + Tor-based .onion discovery
+- ✅ **Libre Relay detection** - Identify and track Libre Relay nodes on the network
+- ✅ **Artifact management** - Import pre-built binaries and pre-synced blockchains from GitHub
+- ✅ **Tor integration** - SOCKS5 proxy for privacy-preserving peer discovery
+- ✅ **Platform ready** - Designed for Start9, Umbrel, and traditional servers
 
+**Target users:** Node operators seeking a modern UI, embedded platform users, developers building on the API.
+
+### 🛠️ TUI Script (Production Deployment & Build Tool)
+
+A bash-based system for artifact generation and system-level operations:
+
+- ✅ **Artifact generation** - Build from source, create pre-synced blockchain archives, package releases
+- ✅ **Container/VM deployment** - Create isolated Bitcoin node environments
+- ✅ **Build automation** - Compile Garbageman/Knots with proper dependencies
+- ✅ **System configuration** - Networking, storage, resource allocation
+- ✅ **Export/transfer** - Modular format for sharing between systems
+
+**Target users:** Release managers, production operators, advanced users needing full system control.
 
 ---
 
-## �🚀 Quick Start
+## 🚀 Quick Start
 
-### 1. Download the Script
+### WebUI Setup (Recommended for Most Users)
+
+**Prerequisites:**
+- Docker 20.10+ with Docker Compose v2+
+- 8+ GB RAM, 4+ CPU cores
+- 100+ GB disk space
 
 ```bash
-sudo apt-get install -y git
-cd ~
+# 1. Clone the repository
 git clone https://github.com/paulscode/garbageman-nm.git
+cd garbageman-nm
+
+# 2. Start all services
+cd devtools
+make up
+
+# 3. Open your browser
+# http://localhost:5173
 ```
 
-### 2. Run It!
+**What you get:**
+- **WebUI** (http://localhost:5173) - Dashboard for managing instances
+- **API** (http://localhost:8080) - Backend with peer discovery services
+- **Supervisor** (http://localhost:9000) - Multi-daemon instance manager
+- **Tor Proxy** (localhost:9050) - SOCKS5 proxy for privacy
+
+**First steps in the UI:**
+1. **Import Artifact** - Click "IMPORT ARTIFACT" → "Import from GitHub" to download pre-built binaries
+2. **Create Instance** - Click "NEW INSTANCE" to configure your first daemon (mainnet, testnet, etc.)
+3. **Start & Sync** - Click "START" and monitor real-time sync progress
+4. **Discover Peers** - Click "VIEW PEERS" to see discovered Bitcoin nodes (clearnet and Tor)
+
+**Enable HTTPS (Optional):**
+For standalone deployments outside of wrapper projects:
+```bash
+# 1. Uncomment the Caddy service in devtools/compose.webui.yml
+# 2. Start services
+make up
+
+# 3. Access via HTTPS
+# https://localhost (self-signed cert for local dev)
+```
+
+For production domains with Let's Encrypt:
+- Edit `devtools/Caddyfile` and replace `localhost` with your domain
+- See [`docs/TLS_SETUP.md`](docs/TLS_SETUP.md) for full guide
+
+**Note:** Wrapper deployments (Start9/Umbrel) handle TLS at their layer - do NOT enable Caddy.
+
+**See [QUICKSTART.md](QUICKSTART.md) for detailed WebUI documentation.**
+
+### TUI Script (For Artifact Generation)
 
 ```bash
-cd ~/garbageman-nm && git pull && ./garbageman-nm.sh
+# Run the TUI script
+./garbageman-nm.sh
+
+# First run will:
+# 1. Install dependencies (asks for sudo once)
+# 2. Choose between Containers or VMs
+# 3. Show menu with deployment options
 ```
 
-That's it! The script will:
-1. Install any missing dependencies (asks for your sudo password once)
-2. Let you choose between Containers or VMs on first run
-3. Show you a menu with clear options
-4. Guide you through each step
+**When to use the TUI:**
+- Building Garbageman/Knots from source for release
+- Generating pre-synced blockchain archives
+- Creating container/VM-based deployments
+- Exporting artifacts for distribution
 
 ---
 
-> **📝 Note:** This project was recently renamed from `Garbageman VM Manager` to `Garbageman Nodes Manager`. If you have used the tool before this change, rename your local folder so the above "Run It" command works:
-> ```bash
-> mv ~/garbageman-vmm ~/garbageman-nm
-> cd ~/garbageman-nm
-> git remote set-url origin https://github.com/paulscode/garbageman-nm.git
-> ```
+## 💻 System Requirements
+
+### For WebUI
+
+**Minimum:**
+- **OS:** Linux (Ubuntu 22.04+, Debian 12+, or similar)
+- **CPU:** 4 cores
+- **RAM:** 8 GB
+- **Disk:** 100 GB free
+- **Docker:** 20.10+ with Compose v2+
+
+**Recommended:**
+- **CPU:** 8+ cores (faster blockchain sync)
+- **RAM:** 16+ GB (run multiple instances)
+- **Disk:** 250+ GB (more instances)
+- **Network:** Broadband connection
+
+**For embedded platforms (Start9, Umbrel):**
+- Platform-specific packaging handles dependencies
+- Resource requirements same as above
+- See platform documentation for deployment
+
+### For TUI Script
+
+Same as WebUI, plus:
+- **For Container mode:** Docker or Podman
+- **For VM mode:** libvirt, qemu-kvm, virtinst
+- All dependencies installed automatically on first run
 
 ---
 
-## 🆚 Containers vs VMs: Which Should You Choose?
+## 🆚 What is Garbageman? Why Does It Exist?
 
-### Containers (Recommended)
-**Best for:** Users who want efficiency and faster operations
+**Garbageman** is a modified Bitcoin node (based on Bitcoin Knots) designed as a **defense against blockchain spam**.
 
-✅ **Pros:**
+> **Note:** This project also supports standard **Bitcoin Knots** nodes. You can choose your preferred implementation during setup.
+
+### The Problem: The Libre Relay Spam Network
+
+Bitcoin nodes traditionally filter spam transactions to protect network resources and maintain usability. However:
+
+- **Libre Relay** is a network of nodes that intentionally relay spam transactions
+- Libre Relay nodes identify each other using a special service bit flag (`NODE_LIBRE_RELAY` - bit 29)
+- They preferentially connect with each other to create a zero-friction pipeline for spam
+- This bypasses the spam filtering policies that most node operators rely on
+- Result: Bad actors can easily flood the network with garbage transactions
+
+**The spam problem is real:**
+- Bloats the UTXO set (unspent transaction outputs) with dust outputs
+- Wastes block space that could be used for legitimate transactions
+- Increases costs for all users (higher fees, more storage)
+- Degrades Bitcoin's usability as a payment system
+
+### The Solution: Garbageman's Approach
+
+**Garbageman nodes act as honeypots** to disrupt spam propagation:
+
+1. **Advertise the `NODE_LIBRE_RELAY` flag** - Tricks Libre Relay nodes into connecting
+2. **Accept connections from spam relayers** - They think you're part of their network
+3. **Silently drop spam transactions** - Instead of relaying, just discard them
+4. **Track patterns to avoid detection** - Sophisticated filtering to stay undetected
+5. **Relay legitimate transactions normally** - Function as a regular pruned or full node otherwise
+
+**Think of it like:** A network of undercover agents infiltrating spam relay infrastructure and preventing garbage from propagating.
+
+### Why Run Multiple Nodes?
+
+**Network effect:**
+- More Garbageman nodes = better coverage against spam relay networks
+- Each node with a unique Tor address can serve different parts of the network
+- Helps isolate spam-relaying nodes from each other
+- Protects Bitcoin's usability and decentralization
+
+**Redundancy:**
+- Multiple nodes provide backup if one goes down
+- Geographic/network diversity improves resilience
+- Different instances can serve different purposes (testing, mainnet, etc.)
+
+**Privacy:**
+- Each node gets its own Tor `.onion` address
+- No single point of correlation for your activities
+- Helps protect your privacy while contributing to the network
+
+### Technical Details
+
+Garbageman is based on Bitcoin Knots, which itself is a Bitcoin Core fork with additional features:
+
+- **Bitcoin Knots:** Aggressive, common-sense spam filtering
+- **Garbageman:** Bitcoin Knots + Libre Relay spoofing and preferential peering
+- Both function as full or pruned, validating Bitcoin nodes
+- Both support all standard Bitcoin features
+
+**For deeper technical discussion:**
+- [Bitcoin Dev mailing list](https://gnusha.org/pi/bitcoindev/aDWfDI03I-Rakopb%40petertodd.org)
+- [Garbageman source repository](https://github.com/chrisguida/bitcoin/tree/garbageman-v29)
+- [Bitcoin Knots documentation](https://bitcoinknots.org/)
+
+---
+
+## 📖 WebUI Usage Guide
+
+### Dashboard Overview
+
+The main dashboard shows:
+
+- **Status Board** - System overview with total instances, active peers, network health
+- **Instance Cards** - Each daemon displayed with real-time metrics
+- **Command Bar** - Quick access to "Import Artifact" and "New Instance"
+- **Alerts Rail** - System notifications and events
+
+### Creating Your First Instance
+
+1. **Import Artifact (Optional but Recommended)**
+   - Click "IMPORT ARTIFACT" in command bar
+   - Choose "Import from GitHub"
+   - Select latest release (e.g., `v2025-11-03-rc2`)
+   - Wait for download (~20GB blockchain + ~500MB binaries)
+   - Benefit: Pre-synced blockchain means you start at recent block height
+
+2. **Create Instance**
+   - Click "NEW INSTANCE"
+   - **Implementation:** Choose Garbageman or Knots
+   - **Network:** mainnet, testnet, signet, or regtest
+   - **Ports:** Auto-assigned or specify custom
+   - **Tor Settings:** Configure .onion service
+   - Click "CREATE"
+
+3. **Start & Monitor**
+   - Click "START" on your instance card
+   - Watch real-time sync progress
+   - Monitor peer connections, block height, sync status
+
+### Peer Discovery Features
+
+Click "VIEW PEERS" to open peer discovery dialog with three tabs:
+
+**Clearnet Peers:**
+- Discovered via DNS seeds (IPv4/IPv6)
+- Filter by: All, Libre Relay, Core v30+
+- Shows: IP, port, user agent, service bits
+- Real-time discovery
+
+**Tor Peers:**
+- Discovered via Tor network (.onion addresses)
+- Uses Libre Relay's seed list (~512 .onion + ~495 IPv6 + ~512 I2P seeds)
+- All connections via Tor SOCKS5 proxy (no IP exposure)
+- Filter by: All, Libre Relay
+- Shows: .onion address, user agent, connection success
+
+**Seeds Checked:**
+- Tracks all seed connection attempts
+- Shows: Success/failure, peers returned, timestamp
+- Useful for debugging bootstrap issues
+
+**Privacy note:** All Tor peer discovery routes through SOCKS5 proxy. Your real IP is never exposed to any peer.
+
+### Artifact Management
+
+**Import from GitHub:**
+- Fetches latest releases from repository
+- Downloads in modular format (blockchain + binaries separate)
+- Verifies all checksums automatically
+- Extracts and prepares for use
+
+**Import from File:**
+- For custom artifacts you've built from the TUI
+- Supports modular export format
+- Verifies integrity via SHA256SUMS
+
+### Instance Monitoring
+
+Each instance card shows:
+
+- **Status:** Up, down, syncing, error
+- **Block Height:** Current vs. network height
+- **Sync Progress:** Percentage complete during blockchain sync
+- **Peers:** Total count and breakdown by type
+- **Peer Breakdown:** Shows counts of Libre Relay, Knots, Core v30+, etc.
+- **Actions:** Start, stop, view logs, delete
+
+**Real-time updates:**
+- Dashboard refreshes every few seconds
+- No manual refresh needed
+- WebSocket connection for live events
+
+### Configuration
+
+**Instances:**
+- Each instance is isolated with its own data directory
+- Configuration stored in `envfiles/instances/<instance-id>.env`
+- Logs available via WebUI or `docker logs`
+
+**System:**
+- Global settings in `envfiles/GLOBAL.env`
+- Tor proxy configuration
+- API server settings
+
+---
+
+## 🛠️ TUI Script Usage Guide
+
+The TUI script (`garbageman-nm.sh`) is a bash-based menu system for production deployment and artifact generation.
+
+### First Run: Choose Deployment Mode
+
+On first run, you'll choose between:
+
+**Containers (Recommended):**
+- Uses Docker or Podman
+- Lightweight, fast startup
 - Lower resource overhead
-- Faster startup (seconds vs minutes)
-- Faster cloning operations
-- More efficient disk space usage (shared base image)
-- Works with Docker or Podman
+- Easy to manage and update
 
-❌ **Cons:**
-- Requires Docker or Podman installed
-- Less isolation than VMs (shares host/sandbox kernel)
+**Virtual Machines:**
+- Uses libvirt/qemu-kvm
+- Complete OS isolation
+- Stable, proven approach
+- Slightly higher overhead
 
-**Resource Usage:**
-- ~2GB RAM per node after sync
-- ~150MB overhead per container (runtime daemon)
-
-### Virtual Machines (Legacy)
-**Best for:** Users who experience instability with containers
-
-✅ **Pros:**
-- Complete isolation from host/sandbox
-- Works with existing VM management tools
-- Full OS environment inside VM
-- Proven stable approach
-
-❌ **Cons:**
-- Higher resource overhead (~200MB per VM)
-- Slower startup times
-- Requires nested virtualization if running in VirtualBox sandbox
-
-**Resource Usage:**
-- ~2GB RAM per node after sync
-- ~200MB overhead per VM (hypervisor, page tables)
-
-### Quick Decision Guide
-
-**Choose Containers if you:**
-- Want to maximize efficiency
-- Need faster startup and cloning
-- Have experience with Docker/Podman
-
-**Choose VMs if you:**
-- Experience instability with containers
-- Have experience with libvirt/qemu
-
-**Note:** The script auto-detects which mode you're using based on whether you've created a container or VM. You only choose once!
-
-## 💻 Requirements
-
-### Minimum System
-- **OS:** Linux Mint 22.2 Cinnamon (or Ubuntu 24.04-based distros)
-- **CPU:** 4 cores (2 cores + 2 reserved for host/sandbox)
-- **RAM:** 8 GB (4 GB + 4 GB reserved for host/sandbox)
-- **Disk:** 50 GB free space (25 GB per container/VM, uses sparse allocation)
-- **Internet:** Broadband connection for blockchain sync
-
-### Recommended System
-- **CPU:** 8+ cores
-- **RAM:** 16+ GB
-- **Disk:** 100+ GB free space (more = more clones possible)
-- **Faster CPU = faster initial blockchain sync**
-
-### What Gets Installed
-
-**For Container Mode:**
-- Container runtime: `docker` OR `podman` (script auto-detects which is available, installs Docker if neither exists)
-- Build tools: `git` (only if building from scratch)
-- Utilities: `jq`, `dialog`, `whiptail`, `netcat`
-
-**For VM Mode:**
-- Virtualization: `qemu-kvm`, `libvirt-daemon-system`, `libvirt-clients`, `virtinst`, `libguestfs-tools`
-- Build tools: `git`, `cmake`, `gcc`, `g++` (only if building from scratch)
-- Utilities: `jq`, `dialog`, `whiptail`, `netcat`
-
-**All dependencies are installed automatically** when you first run the script. You'll be asked for your sudo password once to install packages.
-
----
-
-## � Running in VirtualBox
-
-I recommend running this script **inside a VirtualBox VM** with a Linux Mint 22.2 guest, so that it is sandboxed from the rest of your computer.  This section explains how to optimize VirtualBox for running containers or VMs inside of a VM.
-
-### Why VirtualBox Performance Matters
-
-This script performs CPU and I/O intensive operations:
-- **Compilation:** Building Bitcoin software (30+ minutes of heavy CPU use)
-- **Container operations:** Building Docker images and managing container volumes
-- **Nested Virtualization (VM mode):** Creates Alpine VMs inside your Linux Mint VM using libguestfs/KVM
-- **Blockchain Sync:** Downloads and validates 25+ GB of blockchain data with constant disk I/O
-
-Without proper VirtualBox configuration, these operations can be 3-5x slower than native performance.
-
-### Guest OS Recommendation
-
-**Use Linux Mint 22.2 Cinnamon Edition** for the guest OS:
-- Based on Ubuntu 24.04 LTS (excellent hardware support)
-- Cinnamon desktop is lightweight and responsive
-- All required packages are available in the default repositories
-- Well-tested with this script
-
-**Download:** [linuxmint.com/download.php](https://linuxmint.com/download.php)
-
-### Essential VirtualBox Settings
-
-These settings are **critical** for acceptable performance, and can be edited in the Settings once the VM has been created (shut down the VM first if it is running).
-
-#### 1. System Settings (Settings → System)
-
-**Motherboard Tab:**
-- ✅ **Enable I/O APIC:** Required for multi-core support
-- Set **Base Memory** to at least 8192 MB (8 GB minimum, 16+ GB recommended)
-
-**Processor Tab:**
-- ✅ **Enable PAE/NX:** Required for 64-bit Linux
-- **Nested VT-x/AMD-V:** 
-  - **(for VM mode):** ✅ **Enable** - Required for nested virtualization (VMs inside a VM)
-  - **(for Container mode):** ❌ **Disable** - Reduced overhead
-- Set **Processor(s)** to at least 4 cores (8+ recommended)
-- Set **Processing Cap** to 100% (ensure VM isn't throttled)
-
-**Acceleration Tab:** _(if page blanks, open General Tab then come back)_
-- **Paravirtualization Interface:**
-  - **(for VM mode):** Set to **KVM** (best performance for nested virtualization)
-  - **(for Container mode):** Set to **Default** (may have better compatibility)
-
-#### 2. Storage Settings (Settings → Storage)
-
-**Use VirtIO SCSI Controller for Best I/O Performance:**
-
-1. Click the **"Add Controller"** icon → Select **"VirtIO SCSI"**
-2. Remove your virtual disk from under "Controller: SATA"
-3. Attach your virtual disk to "Controller: VirtIO"
-4. Under **Attributes:**
-   - ✅ **Use Host I/O Cache:** Significantly improves disk performance
-
-#### 3. Network Settings (Settings → Network)
-
-**Adapter 1:**
-- Attached to: **NAT** or **Bridged Adapter**
-- Expand **Advanced** section
-- Set **Adapter Type** to **Paravirtualized Network (virtio-net)** for best performance
-
-#### 4. Display Settings (Settings → Display)
-
-**Screen Tab:**
-- Set **Video Memory** to minimum **16 MB** (this is a server workload, graphics don't matter)
-- ❌ **Disable 3D Acceleration** (not needed, can cause issues)
-
-#### 5. Audio Settings (Settings → Audio)
-
-- ❌ **Disable "Enable Audio"** (not needed for server workloads, saves resources)
-
-### Quick Configuration Checklist
-
-Before running the script, verify these VirtualBox settings:
-
-- [ ] **Nested VT-x/AMD-V enabled (for VM) or disabled (for container)** (System → Processor)
-- [ ] **Paravirtualization Interface = KVM (for VM) or Default (for container)** (System → Acceleration)
-- [ ] **VirtIO SCSI controller** with Host I/O Cache enabled (Storage)
-- [ ] **virtio-net network adapter** (Network → Advanced)
-- [ ] **I/O APIC enabled** (System → Motherboard)
-- [ ] **PAE/NX enabled** (System → Processor)
-- [ ] **Execution Cap = 100%** (System → Processor)
-- [ ] At least **8 GB RAM** and **4 CPU cores** allocated
-- [ ] At least **80 GB disk space** (fixed size VDI recommended)
-- [ ] **3D acceleration disabled** (Display)
-- [ ] **Audio disabled** (Audio)
-
-### Verifying Nested Virtualization Works (VM Mode Only)
-
-If you plan to use VM mode, verify that nested virtualization is working after starting your Linux Mint VM:
-
-```bash
-# Check if KVM is available
-ls -la /dev/kvm
-# Should show: crw-rw---- 1 root kvm ... /dev/kvm
-
-# Check CPU virtualization extensions
-egrep -c '(vmx|svm)' /proc/cpuinfo
-# Should show a number > 0 (number of cores with virt extensions)
-
-# Verify KVM kernel module is loaded
-lsmod | grep kvm
-# Should show: kvm_intel or kvm_amd (depending on your CPU)
-```
-
-If any of these checks fail:
-1. Ensure **Nested VT-x/AMD-V** is enabled in VirtualBox settings
-2. Power off the VM completely and restart it (settings only apply after full shutdown)
-3. Check your host/sandbox BIOS has virtualization enabled (VT-x/AMD-V)
-
----
-
-## 📖 Step-by-Step Usage
+**This choice is locked** after you create your first base instance.
 
 ### Typical Workflow
 
-### Typical Workflow
+**For Artifact Generation (Release Managers):**
 
-Here's the normal sequence most users follow:
+1. **Create Base** (Option 1) → Build from Scratch
+   - Choose implementation (Garbageman or Knots)
+   - Compiles from source (~2 hours)
+   - Creates base container/VM
 
-1. **Choose:** First run selects deployment mode (Container or VM) - *one-time choice*
-2. **Configure:** Configure Defaults (Option 7) - *optional, can use defaults*
-3. **Create:** Create Base Container/VM (Option 1) - *2+ hours*
-4. **Sync:** Monitor Base Sync (Option 2) - *24-28 hours, can pause/resume*
-5. **Clone:** Create Clones (Option 4) - *1-2 minutes per clone*
-6. **Start clones:** Manage Clones (Option 5) → Start each clone
-7. **Daily use:** Use Options 3 and 5 to start/stop as needed
+2. **Monitor Sync** (Option 2)
+   - Syncs blockchain (~24-48 hours)
+   - Live progress display
+   - Auto-adjusts resources
 
-**💡 Pro tip:** Leave the base container/VM running so it remains synced, start/stop clones based on your resource needs.
+3. **Export Artifact** (Option 3) → Manage Base → Export
+   - Creates modular export (blockchain + binaries)
+   - Splits into GitHub-compatible parts (<2GB each)
+   - Generates SHA256SUMS
+   - Ready for GitHub release
 
----
+**For Container/VM Deployment (Production Operators):**
 
-### First Time Setup
+1. **Configure** (Option 7) - Optional, adjust defaults
+2. **Create Base** (Option 1) - Import from GitHub or build
+2. **Monitor Sync** (Option 2) - Wait for blockchain sync to complete
+3. **Create Clones** (Option 4) - Make redundant copies
+5. **Start Clones** (Option 5) - Launch your node fleet
 
-#### Step 0: Choose Deployment Mode (First Run Only)
-
-**On first run, the script will ask:** "Do you want to use Containers or Virtual Machines?"
-
-- **Containers:** Recommended approach, lightweight (requires Docker or Podman)
-- **Virtual Machines:** Legacy approach, more stable on some systems (requires libvirt/qemu-kvm)
-
-**This choice is locked once you create your base** - the script will remember your choice for all future runs.
-
-See the [Containers vs VMs](#-vms-vs-containers-which-should-you-choose) section above to help decide.
-
-#### Step 1: Configure Your Preferences (Optional)
-
-When you first run the script, you can optionally choose **"Configure Defaults"** from the menu to customize:
-
-- **Host/Sandbox Reserves:** How many CPU cores, RAM, and disk space to keep available for your system (default: 2 cores, 4 GB RAM, 20 GB disk)
-- **container/VM Runtime Resources:** How much CPU/RAM each instance uses after sync (default: 1 core, 2 GB per instance)
-- **Clearnet Option:** Whether to allow clearnet connections on the base for faster initial sync (default: yes, clones are always Tor-only)
-
-**Most users can skip this** and use the defaults!
-
-**Note:** The script is intelligent about capacity:
-- Calculates how many clones you can run based on CPU, RAM, **and disk space**
-- Suggests clone counts that won't max out any resource
-- Shows which resource (CPU/RAM/Disk) is limiting your capacity
-
-#### Step 2: Create Base Container/VM
-
-Choose **"Create Base Container/VM"** from the menu. You have three options:
-
-**Option 1: Import from GitHub** (modular downloads, ~1-21GB - works for both containers and VMs!)
-1. Fetches available releases from GitHub
-2. Downloads components based on your choice:
-   - **Container:** Downloads blockchain parts (~20GB) + container image (~500MB)
-   - **VM:** Downloads blockchain parts (~20GB) + VM image (~1GB)
-3. Automatically reassembles blockchain and verifies all checksums
-4. Imports and combines blockchain with container/VM image
-5. Ready to clone immediately!
-6. Note: Blockchain will be slightly behind (hours/days old), but will catch up quickly
-
-**Option 2: Import from File** (for transferring between your own machines)
-1. Select a unified export folder from `~/Downloads/`
-2. Supports unified modular format:
-   - **Unified format:** Separate blockchain + container/VM image in single folder
-3. Verify checksums automatically via SHA256SUMS
-4. Import the pre-synced blockchain and image
-5. Ready in minutes instead of days!
-6. Works for both VMs and containers
-
-**Option 3: Build from Scratch** (2+ hours compile, 24-28 hours sync)
-1. Build Docker image (Containers) or download Alpine Linux base (VMs)
-2. **Choose node implementation:** Garbageman (Libre Relay) or Bitcoin Knots
-3. **Build selected software inside the container/VM** (typically takes 2+ hours, depending on your CPU)
-4. Configure Tor and Bitcoin services
-5. Create base instance ready to sync
-
-**Container vs VM Build Differences:**
-- **Containers:** Multi-stage Dockerfile build (faster, more efficient)
-- **VMs:** Uses libguestfs to build inside Alpine VM (stable, proven approach)
-- Both compile from the same source code repositories (Garbageman or Bitcoin Knots)
-- Both result in identical Bitcoin node behavior
-
-**After creation, you'll be prompted for sync resources:**
-- The script suggests using most of your available CPU/RAM for faster sync
-- You can accept the defaults or adjust based on what else you're running
-
-#### Step 3: Start Sync & Monitor
-
-Choose **"Monitor Base Sync"** from the menu. This will:
-
-1. **Prompt you to confirm/change resources** (in case you want different settings than creation time)
-2. Start the container/VM with your chosen resources (or connect to it if already running)
-3. Show a **live auto-refreshing progress display**:
-
-   **For VMs:**
-   ```
-   ╔════════════════════════════════════════════════════════════════════════════════╗
-   ║                     Garbageman IBD Monitor - 26% Complete                      ║
-   ╠════════════════════════════════════════════════════════════════════════════════╣
-   ║                                                                                ║
-   ║  Host Resources:                                                               ║
-   ║    Cores: 8 total | 2 reserved | 6 available                                   ║
-   ║    RAM:   24032 MiB total | 4096 MiB reserved | 19936 MiB available            ║
-   ║                                                                                ║
-   ║  VM Status:                                                                    ║
-   ║    Name: gm-base                                                               ║
-   ║    IP:   192.168.122.44                                                        ║
-   ║                                                                                ║
-   ║  Bitcoin Sync Status:                                                          ║
-   ║    Node Type: Libre Relay/Garbageman                                           ║
-   ║    Blocks:   529668 / 921108                                                   ║
-   ║    Progress: 26% (0.255699756115667)                                           ║
-   ║    IBD:      true                                                              ║
-   ║    Peers:    14 (2 LR/GM, 3 KNOTS, 1 OLDCORE, 7 COREv30+, 1 OTHER)             ║
-   ║                                                                                ║
-   ╠════════════════════════════════════════════════════════════════════════════════╣
-   ║  Auto-refreshing every 5 seconds... Press 'q' to exit                          ║
-   ╚════════════════════════════════════════════════════════════════════════════════╝
-   ```
-   
-   > **Note:** Node Type will show "Libre Relay/Garbageman" for Garbageman nodes or "Bitcoin Knots" for standard Knots nodes.
-
-   **For Containers:**
-   ```
-   ╔════════════════════════════════════════════════════════════════════════════════╗
-   ║                    Garbageman IBD Monitor - 26% Complete                       ║
-   ╠════════════════════════════════════════════════════════════════════════════════╣
-   ║                                                                                ║
-   ║  Host Resources:                                                               ║
-   ║    Cores: 8 total | 2 reserved | 6 available                                   ║
-   ║    RAM:   24032 MiB total | 4096 MiB reserved | 19936 MiB available            ║
-   ║                                                                                ║
-   ║  Container Status:                                                             ║
-   ║    Name:  gm-base                                                              ║
-   ║    Image: garbageman:latest                                                    ║
-   ║                                                                                ║
-   ║  Bitcoin Sync Status:                                                          ║
-   ║    Node Type: Libre Relay/Garbageman                                           ║
-   ║    Blocks:   529668 / 921108                                                   ║
-   ║    Progress: 26% (0.255699756115667)                                           ║
-   ║    IBD:      true                                                              ║
-   ║    Peers:    14 (2 LR/GM, 3 KNOTS, 1 OLDCORE, 7 COREv30+, 1 OTHER)             ║
-   ║                                                                                ║
-   ╠════════════════════════════════════════════════════════════════════════════════╣
-   ║  Auto-refreshing every 5 seconds... Press 'q' to exit                          ║
-   ╚════════════════════════════════════════════════════════════════════════════════╝
-   ```
-
-4. Auto-refresh every 5 seconds (no manual refresh needed)
-5. When sync completes, automatically shut down and resize to runtime resources (VMs) or update limits (containers)
-
-**⏰ How long does sync take?**
-- With 8+ cores, >8 GB RAM: ~24 hours (depends on multiple factors)
-- With 4+ cores <8 GB RAM: >48 hours
-- You can stop and resume anytime - progress is saved!
-
-**💡 Tip:** Press 'q' anytime to exit the monitor. The container/VM keeps running in the background, and you can reconnect later by choosing "Monitor Base Sync" again (it will detect the instance is already running and let you change resources if needed).
-
-**Container Note:** Containers can be resized on-the-fly without restarting (uses `docker update` or `podman update`). VMs require shutdown/restart to change resources.
-
-#### Step 4: Clone Your Synced Node
-
-Once your base container/VM finishes syncing, you can create clones!
-
-Choose **"Create Clones (gm-clone-*)"** from the menu:
-
-1. Script shows how many clones your system can handle (based on CPU, RAM, **and disk space**)
-2. Enter desired number of clones
-3. If the base is running, it will automatically shut it down gracefully (ensures consistent data during clone)
-4. Each clone:
-   - **Copies the fully-synced blockchain** (no re-download!)
-   - Gets a fresh Tor `.onion` address
-   - Is **forced to Tor-only** (maximum privacy, even if base allows clearnet)
-   - Uses minimal resources (1 core, 2 GB RAM by default)
-   - Named with timestamp (e.g., `gm-clone-20251103-143022`)
-5. After cloning completes, clones are left in stopped state - start them using **"Manage Clones"**
-
-**Example:** On a 16 GB / 8-core / 100 GB disk system with defaults:
-- Host/sandbox reserves: 2 cores, 4 GB RAM, 20 GB disk
-- Available: 6 cores, 12 GB RAM, 80 GB disk
-- Runtime per instance: 1 core, 2 GB RAM, 25 GB disk
-- **CPU capacity:** 6 instances (6 cores / 1 core each)
-- **RAM capacity:** 6 instances (12 GB / 2 GB each)
-- **Disk capacity:** 3 instances (80 GB / 25 GB each)
-- **Maximum clones:** 3 total (limited by disk space!)
-
-**Container vs VM Cloning:**
-- **Containers:** Copy data between volumes (~1 minute per clone, faster due to shared image)
-- **VMs:** Use `virt-clone` to copy disk image (~2 minutes per clone)
-- Both result in identical blockchain state and Tor isolation
-
----
-
-## 🎛️ Menu Options Explained
-
-### Main Menu
-
-The script displays different menus depending on whether you're using Containers or VMs:
-
-**Container Mode:**
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│ Garbageman Container Manager                                                            │
-│                                                                                         │
-│ Deployment: Containers (docker)                                                         │
-│ Host: 8 cores / 24032 MiB   |   Reserve: 2 cores / 4096 MiB                             │
-│ Available after reserve: 6 cores / 19936 MiB                                            │
-│ Base Container exists: Yes                                                              │
-│                                                                                         │
-│ Choose an action:                                                                       │
-│                                                                                         │
-│  1  Create Base Container (gm-base)                                                     │
-│  2  Monitor Base Container Sync (gm-base)                                               │
-│  3  Manage Base Container (gm-base)                                                     │
-│  4  Create Clone Containers (gm-clone-*)                                                │
-│  5  Manage Clone Containers (gm-clone-*)                                                │
-│  6  Capacity Suggestions (host-aware)                                                   │
-│  7  Configure Defaults (reserves, runtime, clearnet)                                    │
-│  8  Quit                                                                                │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-**VM Mode:**
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│ Garbageman Nodes Manager                                                                │
-│                                                                                         │
-│ Deployment: VMs (libvirt/qemu)                                                          │
-│ Host: 8 cores / 24032 MiB   |   Reserve: 2 cores / 4096 MiB                             │
-│ Available after reserve: 6 cores / 19936 MiB                                            │
-│ Base VM exists: Yes                                                                     │
-│                                                                                         │
-│ Choose an action:                                                                       │
-│                                                                                         │
-│  1  Create Base VM (gm-base)                                                            │
-│  2  Monitor Base VM Sync (gm-base)                                                      │
-│  3  Manage Base VM (gm-base)                                                            │
-│  4  Create Clone VMs (gm-clone-*)                                                       │
-│  5  Manage Clone VMs (gm-clone-*)                                                       │
-│  6  Capacity Suggestions (host-aware)                                                   │
-│  7  Configure Defaults (reserves, runtime, clearnet)                                    │
-│  8  Quit                                                                                │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
+### Menu Options Explained
 
 #### Option 1: Create Base Container/VM
-- **When to use:** First time setup
-- **What it does:** Creates your initial Bitcoin node (container or VM) with your choice of implementation
-- **Node selection:** Choose between Garbageman (Libre Relay spam prevention) or Bitcoin Knots
-- **Three methods:** Import from GitHub (both container and VM), Import from file, Build from scratch
-- **Time:** Minutes (import) or 2+ hours (build from scratch)
-- **Deployment choice:** Locked after first base is created
-- **Modular imports:** New format separates blockchain from container/VM image for efficiency
-- **Binary selection:** All methods now allow choosing which node implementation to use
+- **Import from GitHub** - Download pre-built artifacts (minutes)
+- **Import from File** - Use local export folder (minutes)
+- **Build from Scratch** - Compile from source (2+ hours)
+- Choose implementation: Garbageman or Knots
 
 #### Option 2: Monitor Base Sync
-- **When to use:** After creating the base, to sync the blockchain
-- **What it does:** Connects to the instance (starts it if stopped) and shows live auto-refreshing IBD progress
-- **Time:** 24-28 hours (varies greatly, due to multiple factors)
-- **Can be resumed:** Yes! Press Ctrl+C to exit monitor anytime (instance keeps running)
-- **On completion:** Automatically shuts down and resizes to runtime resources (VMs) or updates limits (containers)
-- **Container benefit:** Can resize RAM/CPU on-the-fly without restart
+- Live auto-refreshing blockchain sync progress display
+- Shows: block height, peers by type, sync percentage
+- Detects Libre Relay nodes in peer connections
+- Can exit anytime (instance keeps running)
+- Auto-resizes resources when sync completes
 
 #### Option 3: Manage Base
-- **When to use:** Simple start/stop/status controls for the base, or to export for transfer
-- **What it does:** Power on/off the base instance, check status, or create a modular export
-- **Shows when running:** Tor .onion address and current block height
-- **Export feature (NEW MODULAR FORMAT):** 
-  - Exports blockchain data separately (~20GB, split into GitHub-compatible 1.9GB parts)
-  - Exports container/VM image separately (~500MB-1GB, without blockchain)
-  - Exports node binaries for both implementations (Garbageman and Bitcoin Knots)
-  - Both components have matching timestamps for easy reassembly
-  - All files SHA256 checksummed for integrity verification
-  - Removes all sensitive data: Tor keys, SSH keys, peer databases, logs
-- **Export benefits:**
-  - Smaller container/VM downloads (~1GB vs ~22GB)
-  - Blockchain can be reused across multiple exports
-  - Can update container/VM without re-exporting blockchain
-  - All files under 2GB (GitHub release compatible)
-- **Export location:** Components saved to `~/Downloads/`
-- **Time:** Instant for start/stop/status; 10-30 minutes for export
-- **Cleanup option:** Container mode includes orphaned volume cleanup
+- **Start/Stop** - Control base instance
+- **Status** - View .onion address and block height
+- **Export** - Create modular artifacts for distribution
+  - Blockchain data (~20GB, split into parts)
+  - Container/VM image (~500MB-1GB)
+  - Both implementations' binaries included
+  - SHA256 checksums for integrity
+  - Removes sensitive data (Tor keys, logs, peer DB)
 
 #### Option 4: Create Clones
-- **When to use:** After base is fully synced
-- **What it does:** Creates additional nodes with unique .onion addresses
-- **Time:** 1-2 minutes per clone (containers slightly faster than VMs)
-- **Blockchain re-sync:** No! Clones copy the synced data from base
-- **Auto-shutdown:** Automatically stops base if running (graceful, ensures data consistency)
-- **Capacity check:** Shows how many clones you can create (limited by CPU/RAM/Disk, whichever is most constrained)
+- Copies synced blockchain from base
+- Each clone gets unique .onion address
+- Forced to Tor-only (maximum privacy)
+- Fast: 1-2 minutes per clone
+- Names include timestamp for identification
 
 #### Option 5: Manage Clones
-- **When to use:** Control existing clones
-- **What it does:** Start, stop, monitor, or delete clone instances
-- **Shows when running:** Tor .onion address and current block height for each clone
-- **Live monitor:** Real-time status updates every 5 seconds
-- **Time:** Instant
+- Start/stop individual clones
+- Monitor status and sync progress
+- View .onion addresses
+- Delete clones when no longer needed
 
-#### Option 6: Capacity Suggestions (host/sandbox-aware)
-- **When to use:** Planning how many nodes you can run
-- **What it does:** Shows detailed resource breakdown and clone capacity
-- **Displays:** CPU capacity, RAM capacity, Disk capacity, and which resource is limiting
+#### Option 6: Capacity Suggestions
+- Shows CPU, RAM, and disk capacity
+- Calculates maximum clones possible
+- Identifies limiting resource
 
-#### Option 7: Configure Defaults (reserves, runtime, clearnet)
-- **When to use:** Adjust how resources are allocated
-- **What it does:** Reset to original host/sandbox-aware defaults or customize reserves, instance sizes, and clearnet option
-- **Options:**
-  - **Reset to Original Values:** Restores hardcoded defaults (2 cores, 4GB RAM, 20GB disk reserve; 1 vCPU/2GB RAM/25GB disk per instance)
-  - **Choose Custom Values:** Fine-tune each setting individually
-- **Applies to:** Both containers and VMs use the same settings for consistency
+#### Option 7: Configure Defaults
+- **Host Reserves** - Resources kept for system
+- **Runtime Resources** - Per-instance allocation
+- **Clearnet Option** - Allow clearnet on base (clones always Tor-only)
+
+### Resource Management
+
+**Three-phase model:**
+
+1. **Build** (2+ hours, one-time)
+   - Uses sync allocation
+   - More CPU = faster compilation
+
+2. **Initial Sync** (24-48 hours, one-time)
+   - Configurable resources
+   - More resources = faster sync
+   - Default: all available after reserves
+
+3. **Runtime** (ongoing)
+   - Lower footprint per instance
+   - Default: 1 core, 2GB RAM per node
+   - Scales based on system capacity
+
+### Exporting Artifacts for GitHub Releases
+
+The TUI script creates modular exports optimized for GitHub releases:
+
+**Export format:**
+```
+gm-export-YYYYMMDD-HHMMSS/
+├── bitcoin-cli
+├── bitcoind
+├── blockchain.tar.gz.part01 (1.9GB)
+├── blockchain.tar.gz.part02 (1.9GB)
+├── blockchain.tar.gz.part03 (1.9GB)
+├── ... (8-12 parts total, ~20GB)
+├── container-image.tar.gz (200MB) OR vm-image.tar.gz (400MB)
+├── SHA256SUMS (checksums for all files)
+└── MANIFEST.txt (assembly instructions)
+```
+
+**Benefits:**
+- All parts under 2GB (GitHub limit)
+- Blockchain shared across releases
+- Can update images without re-uploading blockchain
+- Integrity verified via checksums
+- Both implementations included
+
+**See [RELEASE_GUIDE.md](RELEASE_GUIDE.md) for complete release creation process.**
+
+### VirtualBox Optimization (Optional)
+
+If running the TUI script inside a VirtualBox VM (sandboxing recommended):
+
+**Critical settings:**
+- **Enable Nested VT-x/AMD-V** (for VM mode) or disable (for Container mode)
+- **Paravirtualization Interface:** KVM (VM mode) or Default (Container mode)
+- **VirtIO SCSI controller** with Host I/O Cache
+- **virtio-net network adapter**
+- **Minimum:** 8GB RAM, 4 cores, 80GB disk
+
+See the TUI section below for complete VirtualBox optimization guide.
 
 ---
 
 ## 🔒 Privacy & Security Features
 
-### Tor-Only Clones
-All clones are **forced to Tor-only** networking, regardless of your clearnet setting:
-- ✅ Every clone gets a unique `.onion` v3 address
-- ✅ No clearnet connections (IP address never exposed to peers)
-- ✅ All peer discovery happens over Tor
-- ✅ Perfect for privacy-conscious node operators
-- ✅ Each clone discovers its own independent peer set (no clustering)
+### WebUI Security
 
-**Clone Bitcoin Configuration:**
+**Authentication:**
+- JWT-based authentication for all API endpoints
+- Server-side password validation with rate limiting
+- Support for wrapper-provided passwords (Start9/Umbrel via `WRAPPER_UI_PASSWORD`)
+- Auto-generated secure passwords for standalone deployments
+- 24-hour token expiration with automatic re-authentication
+- See [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for details
+
+**RPC Credentials:**
+- Auto-generated unique credentials per Bitcoin instance
+- Cryptographically secure 256-bit passwords
+- No hardcoded credentials in codebase
+- Wrapper support via environment variables
+
+**Tor Integration:**
+- All .onion peer discovery via SOCKS5 proxy
+- No clearnet IP exposure during Tor discovery
+- Multiple validation layers prevent clearnet leaks
+- Null IP addresses in protocol messages (0.0.0.0)
+
+**Network Isolation:**
+- Each daemon instance runs in isolated environment
+- Separate data directories per instance
+- Docker networking provides namespace isolation
+
+**Data Protection:**
+- Designed for both trusted local and remote deployments
+- For remote access over internet, use TLS/HTTPS (see below)
+- Session tokens stored in browser sessionStorage (cleared on close)
+
+**TLS/HTTPS:**
+- Optional Caddy reverse proxy for standalone deployments
+- Automatic Let's Encrypt certificates for production domains
+- Self-signed certificates for local/internal use
+- See [`docs/TLS_SETUP.md`](docs/TLS_SETUP.md) for configuration
+- **Note:** Wrapper deployments (Start9/Umbrel) handle TLS at their layer
+
+**Input Validation:**
+- JSON schema validation on all API endpoints
+- Path traversal protection for instance IDs
+- Command injection prevention via safe process spawning
+- Rate limiting (1000 requests/minute per IP)
+
+**Privacy Protection:**
+- Blockchain artifacts automatically cleaned of identifying data
+- Removes Tor keys, peer databases, port configurations
+- Prevents IP/identity leakage across instances
+
+### TUI Script Security
+
+**Tor-Only Clones:**
+All clones created by TUI script are forced to Tor-only:
+
 ```
 onlynet=onion          # Only connect to .onion addresses
 listen=1               # Accept incoming connections
 listenonion=1          # Via Tor hidden service only
 discover=0             # No local network peer discovery
-dnsseed=0              # No DNS seed queries (would leak to clearnet)
+dnsseed=0              # No DNS seed queries
 proxy=127.0.0.1:9050   # All traffic through Tor SOCKS proxy
 ```
 
-This configuration ensures **complete Tor isolation** - no clearnet IP exposure.
+This ensures **complete Tor isolation** - no clearnet IP exposure.
 
-### Base Container/VM Clearnet Option
-The base container/VM can optionally use **Tor + clearnet** (configurable):
-- **Why clearnet?** Faster initial sync with more peer options
-- **After sync:** You can keep it or switch to Tor-only
-- **Clones:** Always Tor-only regardless of base setting
+**Base Container/VM:**
+- Can optionally use Tor + clearnet (faster initial sync)
+- Configurable via CLEARNET_OK setting
+- Clones always Tor-only regardless of base setting
 
-### SSH Keys
-The script uses a dedicated temporary SSH key for monitoring:
-- Stored in: `~/.cache/gm-monitor/`
-- Purpose: Poll `bitcoin-cli` RPC for sync progress
-- Not your personal SSH keys (isolated and safe)
+**SSH Keys (VMs only):**
+- Temporary monitoring key stored in `~/.cache/gm-monitor/`
+- Used only for polling bitcoin-cli RPC
+- Isolated from your personal SSH keys
 
-### Network Isolation (Container Mode)
-Each container runs in its **own network namespace** for complete isolation:
-- **Bridge networking** (not host networking): Each container has isolated networking
-- **Port exposure (base only, clearnet mode):** When CLEARNET_OK=yes, port 8333 is exposed on the base container
-  - Allows incoming clearnet P2P connections if you set up port forwarding on your router
-  - Only the base container exposes this port (no conflicts)
-  - Tor-only mode: No ports exposed (incoming connections via Tor only)
-- **Clones never expose ports:** Always Tor-only, would conflict with base if they tried
-- **Tor handles all incoming for Tor-only mode:** Via hidden service (.onion address)
-- **Outbound connections:** Work normally through container's network interface
-- **Benefits:**
-  - No conflicts with host services (e.g., if you run Tor or Bitcoin on your host)
-  - Each container's Tor instance is completely isolated
-  - Multiple clones can run simultaneously without any port conflicts
-  - Improved security through network namespace separation
-  - Base with clearnet can accept incoming connections from both clearnet and Tor
-  - All clones remain Tor-only for maximum privacy
+**Network Isolation (Container Mode):**
+- Bridge networking (not host mode)
+- Each container has isolated network namespace
+- Base can expose port 8333 if CLEARNET_OK=yes
+- Clones never expose ports (always Tor-only)
+- Prevents conflicts, improves security
 
-**Why this matters:** 
-- **Base with CLEARNET_OK=yes:** Exposes port 8333, allowing you to forward it on your router for incoming clearnet connections while still maintaining Tor connectivity
-- **Base with Tor-only:** No ports exposed, all incoming connections via Tor hidden service
-- **All clones:** Always Tor-only, never expose ports (would conflict with base)
-- Outbound connections work fine without port exposure
-- Each container gets its own .onion address for incoming Tor connections
+**Export Security:**
+- All sensitive data removed from exports
+- Tor private keys regenerated on import
+- SSH keys not included
+- Peer database and logs cleared
+- Clean state for distribution
 
 ---
 
-## 📊 Resource Management
+## 📊 Architecture
 
-### How Resources Are Allocated
+### WebUI Architecture
 
-The script uses a **three-phase resource model**:
-
-#### Phase 1: Build (Temporary)
-- **Duration:** 2+ hours (one-time)
-- **Resources:** Uses your "sync" allocation
-- **Why:** More CPU = faster compilation
-
-#### Phase 2: Initial Sync (Temporary)
-- **Duration:** 24-28 hours (one-time per base container/VM)
-- **Resources:** You configure this (default: all available after reserves)
-- **Why:** More resources = faster blockchain download
-
-#### Phase 3: Runtime (Long-term)
-- **Duration:** Forever (or until you stop the containers/VMs)
-- **Resources:** Smaller footprint (default: 1 core, 2 GB per container/VM)
-- **Why:** Pruned nodes don't need much after sync
-
-### Example Resource Allocation
-
-**System:** 16 GB RAM, 8 cores
-
-**Defaults:**
 ```
-Host/sandbox reserves: 4 GB RAM, 2 cores (for your desktop)
-Available:             12 GB RAM, 6 cores (for containers/VMs)
+┌─────────────────────────────────────────────┐
+│  Browser (localhost:5173)                   │
+│  - React + TypeScript + Tailwind            │
+│  - Real-time WebSocket connection           │
+└──────────────────┬──────────────────────────┘
+                   │ HTTP/WS
+                   ▼
+┌─────────────────────────────────────────────┐
+│  API Server (localhost:8080)                │
+│  - Express + TypeScript                     │
+│  - Peer discovery services                  │
+│  - Artifact management                      │
+│  - Event streaming                          │
+└──────────────────┬──────────────────────────┘
+                   │ HTTP
+                   ▼
+┌─────────────────────────────────────────────┐
+│  Multi-Daemon Supervisor (localhost:9000)   │
+│  - Instance lifecycle management            │
+│  - Process spawning/monitoring              │
+│  - Configuration management                 │
+└──────────────────┬──────────────────────────┘
+                   │ spawn/exec
+                   ▼
+┌─────────────────────────────────────────────┐
+│  Bitcoin Daemons (dynamic ports)            │
+│  - Garbageman / Knots implementations       │
+│  - Real P2P network connections             │
+│  - Blockchain storage and validation        │
+└─────────────────────────────────────────────┘
 
-Phase 2 (sync):   12 GB RAM, 6 cores (base container/VM only)
-Phase 3 (runtime): 2 GB RAM, 1 core (per container/VM)
-
-Capacity: 6 containers/VMs simultaneously (1 base + 5 clones)
+          All containers run on Docker/Podman
+          Tor proxy service provides SOCKS5
 ```
 
-**Adjustable in "Configure Defaults"!**
+### TUI Script Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  garbageman-nm.sh (Bash TUI)                │
+│  - Menu system and user interaction         │
+│  - Resource calculation and validation      │
+│  - Deployment orchestration                 │
+└──────────────────┬──────────────────────────┘
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+        ▼                     ▼
+┌──────────────┐      ┌──────────────┐
+│  Docker/     │      │  libvirt/    │
+│  Podman      │      │  qemu-kvm    │
+│  (Containers)│      │  (VMs)       │
+└──────┬───────┘      └──────┬───────┘
+       │                     │
+       ▼                     ▼
+┌─────────────────────────────────────────────┐
+│  Base Instance (gm-base)                    │
+│  - Alpine Linux OS                          │
+│  - Garbageman or Knots daemon               │
+│  - Tor hidden service                       │
+│  - Full blockchain validation               │
+└──────────────────┬──────────────────────────┘
+                   │ clone
+                   ▼
+┌─────────────────────────────────────────────┐
+│  Clones (gm-clone-*)                        │
+│  - Copies of synced base                    │
+│  - Unique .onion addresses                  │
+│  - Tor-only networking                      │
+│  - Independent peer connections             │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## 🌐 Deployment Scenarios
+
+### Personal Servers (Start9, Umbrel)
+
+**WebUI designed for the self-sovereign individual:**
+
+- **Docker-based** - Standard containerization
+- **Web interface** - No desktop environment needed
+- **Privacy-first** - Tor integration built-in
+
+**Platform integration:**
+- Package as platform-specific app
+- Expose WebUI via platform's app interface
+- Leverage platform's Tor proxy if available
+- Use platform's storage management
+
+### Traditional Servers
+
+**For VPS/dedicated servers:**
+
+- Use WebUI for management interface
+- Deploy via Docker Compose
+- Configure reverse proxy (nginx/caddy) for HTTPS
+- Set up SSH tunnel for secure remote access
+
+**Production deployment:**
+```bash
+# 1. Clone and configure
+git clone https://github.com/paulscode/garbageman-nm.git
+cd garbageman-nm/devtools
+
+# 2. Adjust environment variables
+cp ../envfiles/GLOBAL.env ../envfiles/GLOBAL.env.local
+# Edit GLOBAL.env.local with your settings
+
+# 3. Start services
+make up
+
+# 4. Access via SSH tunnel
+# From your local machine:
+ssh -L 5173:localhost:5173 user@your-server
+# Then open http://localhost:5173
+```
+
+### Development Environment
+
+**For developers building on the API:**
+
+```bash
+# Run individual services locally
+cd webui/api
+npm install
+npm run dev  # API on :8080
+
+cd webui/ui
+npm install
+npm run dev  # UI on :5173
+
+cd multi-daemon
+npm install
+npm run dev  # Supervisor on :9000
+```
+
+**Hot reload enabled** for rapid development.
+
+---
+
+## 🎛️ Advanced TUI Configuration
+
+### Containers vs VMs: Detailed Comparison
+
+#### Containers (Docker/Podman) - Recommended
+
+**Pros:**
+- **Lower overhead** - Shared kernel, minimal memory footprint
+- **Faster operations** - Seconds to start/stop vs minutes for VMs
+- **Efficient cloning** - Copy-on-write storage, shared base images
+- **Easy management** - Standard Docker/Podman CLI tools
+- **Better integration** - Works well with modern orchestration
+
+**Cons:**
+- **Less isolation** - Shares host kernel (security consideration)
+- **Requires container runtime** - Docker or Podman must be installed
+
+**Resource usage:**
+- ~2GB RAM per instance after sync
+- ~150MB overhead per container (runtime daemon)
+- ~25GB disk per instance (sparse allocation)
+
+#### Virtual Machines (libvirt/qemu) - Legacy
+
+**Pros:**
+- **Complete isolation** - Full OS per VM, own kernel
+- **Proven stability** - Mature virtualization technology
+- **Works with existing tools** - libvirt/virt-manager ecosystem
+
+**Cons:**
+- **Higher overhead** - ~200MB RAM per VM for hypervisor
+- **Slower operations** - Minutes to start/clone VMs
+- **More complex** - Requires nested virtualization in VirtualBox
+- **Legacy approach** - Containers now preferred
+
+**Resource usage:**
+- ~2GB RAM per instance after sync
+- ~200MB overhead per VM (QEMU/KVM, page tables)
+- ~25GB disk per instance (qcow2 format)
+
+### Running TUI Script in VirtualBox
+
+For sandboxing, run the TUI script inside a VirtualBox VM.
+
+#### Essential VirtualBox Settings
+
+**System → Motherboard:**
+- ✅ Enable I/O APIC (required for multi-core)
+- **Base Memory:** 8192 MB minimum (16384+ recommended)
+
+**System → Processor:**
+- ✅ Enable PAE/NX (required for 64-bit)
+- **Nested VT-x/AMD-V:**
+  - ✅ Enable for VM mode (required for nested virtualization)
+  - ❌ Disable for Container mode (reduces overhead)
+- **Processors:** 4 minimum (8+ recommended)
+- **Execution Cap:** 100% (don't throttle)
+
+**System → Acceleration:**
+- **Paravirtualization Interface:**
+  - **KVM** for VM mode (best nested virt performance)
+  - **Default** for Container mode (better compatibility)
+
+**Storage:**
+- Use **VirtIO SCSI** controller (not SATA/IDE)
+- ✅ Enable "Use Host I/O Cache" (significant performance boost)
+- **Disk type:** Fixed size VDI recommended (80+ GB)
+
+**Network → Adapter 1:**
+- **Adapter Type:** Paravirtualized Network (virtio-net)
+- **Attached to:** NAT or Bridged
+
+**Display:**
+- **Video Memory:** 16 MB minimum (graphics don't matter)
+- ❌ Disable 3D Acceleration (can cause issues)
+
+**Audio:**
+- ❌ Disable Audio (not needed, saves resources)
+
+#### Verifying Nested Virtualization (VM Mode)
+
+Inside your Linux Mint guest VM:
+
+```bash
+# Check /dev/kvm exists
+ls -la /dev/kvm
+# Should show: crw-rw---- 1 root kvm ... /dev/kvm
+
+# Check CPU virtualization extensions
+egrep -c '(vmx|svm)' /proc/cpuinfo
+# Should show number > 0
+
+# Verify KVM module loaded
+lsmod | grep kvm
+# Should show: kvm_intel or kvm_amd
+```
+
+If these checks fail:
+1. Ensure **Nested VT-x/AMD-V** enabled in VirtualBox settings
+2. Power off VM completely (not just shutdown) and restart
+3. Verify your host BIOS has VT-x/AMD-V enabled
+
+### Environment Variable Overrides
+
+Customize TUI script behavior:
+
+```bash
+# Container mode
+CONTAINER_NAME=my-node ./garbageman-nm.sh
+CONTAINER_RUNTIME_CPUS=2 CONTAINER_RUNTIME_RAM=4096 ./garbageman-nm.sh
+
+# VM mode
+VM_NAME=my-node ./garbageman-nm.sh
+VM_VCPUS=2 VM_RAM_MB=4096 VM_DISK_GB=50 ./garbageman-nm.sh
+
+# Force Tor-only
+CLEARNET_OK=no ./garbageman-nm.sh
+
+# Custom Garbageman branch
+GM_BRANCH=my-custom-branch ./garbageman-nm.sh
+```
 
 ---
 
 ## ❓ Frequently Asked Questions
 
-### Should I use "Monitor Base container/VM Sync" or "Manage Base container/VM"?
+### General Questions
 
-- **Monitor Base container/VM Sync (Option 2):** Use this when you want to watch the blockchain sync progress with a live updating display. Best for initial sync or checking sync status.
-- **Manage Base container/VM (Option 3):** Use this for simple start/stop/status controls, or to export the container/VM for transfer to another system. Shows .onion address and current block height when running. Good for daily management and creating portable backups.
+**Q: Should I use the WebUI or TUI script?**
 
-Both can start the container/VM, but Option 2 provides detailed monitoring while Option 3 is quicker for basic operations.
+A: **WebUI** for most users - modern interface, easier to use, designed for embedded platforms. **TUI script** for building releases, generating artifacts, or VM/container-based deployments.
 
-### How much disk space does each container/VM use?
+**Q: Can I use both WebUI and TUI script?**
 
-- **Base container/VM after sync:** ~25 GB (pruned blockchain + OS)
-- **Each clone:** ~25 GB (copy of base container/VM)
-- **Format:** qcow2 with sparse allocation (only uses space it needs)
-- **Clone naming:** Clones are named with timestamps (e.g., `gm-clone-20251025-143022`) for easy identification
+A: Yes, but they manage instances independently. WebUI instances are daemons within a single container. TUI script creates separate Docker containers or VMs. They don't interfere with each other.
 
-### Can I run the containers/VMs on a different computer?
+**Q: Which is better: Garbageman or Bitcoin Knots?**
 
-Yes! Use the built-in modular export feature:
+A: **Garbageman** to fight on the front lines in the spam war. **Knots** for sane, common-sense anti-spam policy.
 
-1. **Export from source machine:**
-   - Choose **Option 3: Manage Base** → **Export VM/Container (for transfer)**
-   - Creates unified export folder: `~/Downloads/gm-export-YYYYMMDD-HHMMSS/`
-   - Contains all components:
-     - **Blockchain data:** Split into 1.9GB parts (`blockchain.tar.gz.part01`, `part02`, etc.)
-     - **Container/VM image:** `container-image.tar.gz` or `vm-image.tar.gz` (~500MB-1GB)
-     - **Checksums:** `SHA256SUMS` (unified checksums for all files)
-     - **Documentation:** `MANIFEST.txt` (assembly instructions)
-   - All sensitive data removed (Tor keys, SSH keys, peer databases, logs)
-   - All files SHA256 checksummed for integrity verification
+### WebUI Questions
 
-2. **Transfer to destination machine:**
-   - Copy entire export folder to `~/Downloads/`
-   - All checksums are included automatically
+**Q: How do I access the WebUI remotely?**
 
-3. **Import on destination machine:**
-   - Choose **Option 1: Create Base Container/VM** → **"Import from file"**
-   - Script will:
-     - Scan `~/Downloads/` for export folders
-     - Detect unified modular format
-     - Verify all SHA256 checksums automatically via SHA256SUMS
-     - Reassemble blockchain if needed
-     - Extract and import the image
-     - Combine blockchain with container/VM
-     - Configure resources and prepare for use
-   - If blockchain is >2 hours old, sync monitoring will automatically detect
-     and wait for peers to connect and catch up to current height
-
-**Benefits of modular format:**
-- Smaller image downloads (~1GB vs ~22GB)
-- Blockchain can be reused across multiple exports
-- Can update container/VM without re-transferring blockchain
-- All parts under 2GB (GitHub release compatible)
-
-**Creating GitHub Releases (for maintainers/contributors):**
-
-If you want to share your synced base container/VM as a GitHub release:
-
-1. **Export from main script:**
-   - Run the main script: `./garbageman-nm.sh`
-   - For Containers: Choose **"Export Base Container"**
-   - For VMs: Choose **"Export Base VM"**
-   - Select export type:
-     - **Full export (with blockchain)** - Complete package for GitHub releases
-     - Image-only export - For updates without blockchain data
-   - Output: `~/Downloads/gm-export-YYYYMMDD-HHMMSS/`
-   - All files are ready for GitHub release (blockchain split into <2GB parts)
-
-2. **Create a release tag:**
-   ```bash
-   git tag -a v1.0.0 -m "Release v1.0.0 - Block height 921000"
-   git push origin v1.0.0
-   ```
-
-3. **Upload to GitHub:**
-   - Go to https://github.com/paulscode/garbageman-nm/releases
-   - Click "Draft a new release"
-   - Select your tag
-   - Upload all files from the export directory:
-     - All `blockchain.tar.gz.part*` files (shared between container and VM)
-     - `SHA256SUMS` (unified checksums) and `MANIFEST.txt`
-     - `vm-image.tar.gz` (if VM release)
-     - `container-image.tar.gz` (if container release)
-   - Add release notes with blockchain height, date, and unified format benefits
-   - Publish!
-
-4. **Users can then import via:**
-   - **Container:** Option 1: Create Base Container → Import from GitHub
-   - **VM:** Option 1: Create Base VM → Import from GitHub
-   - Script downloads blockchain parts + image, verifies checksums, reassembles, and imports automatically
-
-**See RELEASE_GUIDE.md for complete release creation instructions.**
-
-### What if I run out of resources?
-
-The script prevents over-allocation:
-- Shows capacity suggestions before creation
-- Validates your inputs against available resources
-- Warns if you try to allocate too much
-
-If you need more capacity:
-- Reduce runtime container/VM sizes in "Configure Defaults"
-- Upgrade your hardware
-- Stop some VMs when not needed
-
-### How do I view a container's/VM's .onion address?
-
-**Easy way:** Use the menu options:
-- **Option 3: Manage Base Container/VM** - Shows .onion address when the base is running (also supports exporting)
-- **Option 5: Manage Clone Containers/VMs** - Shows .onion address when you select a running clone
-
-**Manual way (VMs only):**
+A: Use SSH tunnel for security:
 ```bash
-# Get the VM's IP address
-virsh domifaddr gm-base
+ssh -L 5173:localhost:5173 user@your-server
+```
+Then open http://localhost:5173 on your local machine.
 
-# SSH into the VM and read the hostname file
-ssh root@<VM_IP>
-cat /var/lib/tor/bitcoin-service/hostname
+**Q: How do I update the WebUI?**
+
+A:
+```bash
+cd garbageman-nm/devtools
+make down
+git pull
+make rebuild
 ```
 
-**Manual way (Containers):**
+**Q: Where are instance data stored?**
+
+A: Each instance gets its own data directory:
+- Config: `envfiles/instances/<instance-id>.env`
+- Blockchain: Docker volumes or configured data paths
+- Logs: Via `docker logs <container-id>`
+
+### TUI Script Questions
+
+**Q: How much disk space does each instance use?**
+
+A: ~25GB per instance (pruned blockchain + OS). Format uses sparse allocation, so it only consumes space it needs.
+
+**Q: Can I transfer instances between computers?**
+
+A: Yes, use the export feature (Option 3 → Manage Base → Export). Creates modular format with blockchain + image + checksums.
+
+**Q: How do I view an instance's .onion address?**
+
+A: Use menu options (Option 3 for base, Option 5 for clones). Or manually:
 ```bash
-# For Docker
+# VMs
+ssh root@<VM_IP> cat /var/lib/tor/bitcoin-service/hostname
+
+# Containers
 docker exec gm-base cat /var/lib/tor/bitcoin-service/hostname
-
-# For Podman
-podman exec gm-base cat /var/lib/tor/bitcoin-service/hostname
 ```
 
-The .onion address is automatically generated when the container/VM first boots.
+**Q: What if I run out of resources?**
 
-### How do I stop all containers/VMs?
+A: The script prevents over-allocation and shows capacity suggestions. To expand capacity: reduce per-instance resources (Option 7), upgrade hardware, or stop unneeded instances.
 
-**For Containers:**
-```bash
-# Docker
-docker ps -a                          # List all containers
-docker stop gm-base                   # Graceful shutdown
-docker stop $(docker ps -q -f name=gm)  # Stop all gm containers
+**Q: Can I access the VM console?**
 
-# Podman
-podman ps -a                          # List all containers
-podman stop gm-base                   # Graceful shutdown
-podman stop $(podman ps -q -f name=gm)  # Stop all gm containers
-```
-
-**For VMs:**
-```bash
-virsh list --all                    # List all VMs
-virsh shutdown gm-base              # Graceful shutdown
-virsh destroy gm-base               # Force stop (if needed)
-```
-
-Or use the "Manage Base Container/VM" and "Manage Clones" menu options.
-
-### How do I delete a container/VM?
-
-**Base container/VM and clones are managed separately:**
-
-**For the Base Container/VM:**
-- Choose **"Manage Base Container/VM"** → **"Delete Base Container/VM"**
-- This permanently removes the base container/VM and its data
-- You'll need to recreate it with "Create Base Container/VM" if you want to make new clones
-- Asks for confirmation before deleting
-
-**For Clone Containers/VMs:**
-- Choose **"Manage Clone Containers/VMs"** → select the clone → **"Delete Container/VM (permanent)"**
-- This only deletes the specific clone you selected
-- Other clones and the base remain untouched
-- Asks for confirmation before deleting
-
-**Manual way (container clones):**
-```bash
-# Docker
-docker stop gm-clone-20251103-143022
-docker rm gm-clone-20251103-143022
-docker volume rm gm-clone-20251103-143022-data
-
-# Podman
-podman stop gm-clone-20251103-143022
-podman rm gm-clone-20251103-143022
-podman volume rm gm-clone-20251103-143022-data
-```
-
-**Manual way (VM clones):**
-```bash
-virsh undefine gm-clone-20251025-143022           # Remove VM definition
-rm /var/lib/libvirt/images/gm-clone-20251025-143022.qcow2  # Delete disk
-```
-
-**Manual way (base container/VM):**
-
-Use the included deletion script for thorough removal:
-```bash
-./devtools/delete-gm-base.sh
-```
-This removes the container/VM, data volumes/disk image, and associated SSH keys.
-
-### Can I access the container/VM console?
-
-**For VMs:**
-Yes! You can access the VM's console directly:
-
+A: Yes:
 ```bash
 virsh console gm-base
 # Login: root
 # Password: garbageman
+# Press Ctrl+] to exit
 ```
 
-Press `Ctrl+]` to exit the console.
-
-**Security Note:** The default password `garbageman` is only usable via the direct console (virsh console). SSH password authentication is automatically disabled after first-boot, so remote login requires the monitoring SSH key. VMs run on an isolated NAT network (192.168.122.0/24) and are not accessible from external networks.
-
-**For Containers:**
-Use the exec command to get a shell:
-
+For containers, use exec:
 ```bash
-# Docker
 docker exec -it gm-base sh
-
-# Podman
-podman exec -it gm-base sh
 ```
 
-**Note:** The script automatically handles SSH access for VMs for monitoring, so you typically don't need console access. But it's available if you want to troubleshoot or explore internally.
+### Peer Discovery Questions
 
-### How do I check if bitcoind is running inside the container/VM?
+**Q: How does Tor peer discovery work?**
 
-**Easy way:** Check the menu options - when a container/VM is running, Options 3 and 5 show block height (which means bitcoind is running).
+A: The system loads seed addresses from Libre Relay's node list (~512 .onion + ~495 IPv6 + ~512 I2P), connects via Tor SOCKS5 proxy, performs Bitcoin P2P handshake, requests peer addresses (getaddr), and filters for .onion addresses to save. IPv6 seeds are used as fallback for bootstrap (via Tor exit nodes), but only .onion addresses are persisted. All connections via Tor - your real IP is never exposed.
 
-**Manual way (VMs):**
+**Q: Why do I see IPv6 addresses in seed list?**
+
+A: Seeds include .onion, IPv6 (CJDNS), and I2P addresses. IPv6 seeds are used as fallback for initial bootstrap (via Tor exit nodes). Only .onion addresses are saved to database.
+
+**Q: How can I verify Tor connections?**
+
+A:
 ```bash
-# Get the VM's IP address
-virsh domifaddr gm-base
+# Monitor Tor proxy connections
+sudo ss -tunap | grep 9050
 
-# SSH into the VM (password: garbageman, or use the monitoring key)
-ssh root@<VM_IP>
-
-# Check bitcoind status
-ps aux | grep bitcoind
-bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo
+# Check for clearnet Bitcoin leaks (should be empty)
+sudo tcpdump -i any -n 'port 8333 and not host 127.0.0.1'
 ```
 
-You can also use the monitoring SSH key:
-```bash
-ssh -i ~/.cache/gm-monitor/gm_monitor_ed25519 root@<VM_IP>
-```
+**Q: What is Libre Relay detection?**
 
-**Manual way (Containers):**
-```bash
-# Docker
-docker exec gm-base ps aux | grep bitcoind
-docker exec gm-base bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo
-
-# Podman
-podman exec gm-base ps aux | grep bitcoind
-podman exec gm-base bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo
-```
-
-### What is Garbageman and why does it exist?
-
-**Garbageman** is a modified Bitcoin node (based on Bitcoin Knots) designed as a **defense against blockchain spam**.
-
-> **Note:** This script also supports running standard **Bitcoin Knots** nodes if you prefer not to use the Libre Relay spam prevention features. You can choose your preferred implementation during setup.
-
-**The Problem:**
-- Some users broadcast transactions to the Bitcoin network that most node operators consider spam (though technically valid)
-- **Libre Relay** is a network of nodes that intentionally relay this spam
-- Libre Relay nodes identify each other using a special flag (`NODE_LIBRE_RELAY`) to preferentially connect with each other
-- This creates a gaping, zero-friction pipeline for bad actors to bypass sane spam filtering policy norms and get their garbage into a block
-
-**The Solution (Garbageman approach):**
-- **Garbageman** also advertises the `NODE_LIBRE_RELAY` flag
-- This tricks Libre Relay nodes into connecting with it
-- But instead of relaying spam, Garbageman **silently drops it**
-- This helps isolate spam-relaying nodes from each other
-- Result: Spam has a harder time propagating across the network
-
-**Think of it like:** Garbageman nodes act as "honeypots" that attract spam-relaying connections but don't forward the spam, helping to contain it.
-
-**Why run multiple nodes?**
-- **Garbageman:** More nodes = better coverage against spam relay networks
-- **Bitcoin Knots:** Standard full nodes help validate and relay legitimate Bitcoin transactions
-- Each node with a unique Tor address can serve the network independently
-- Helps protect the Bitcoin network's usability and decentralization
-
-**Technical details:**
-- Both implementations based on Bitcoin Knots (a Bitcoin Core fork with additional features)
-- Function as full validating Bitcoin nodes
-- Garbageman tracks transactions to avoid detection by spam relayers
-- Otherwise behave like standard Bitcoin nodes
-
-For deeper technical discussion, see:
-- [Bitcoin Dev mailing list discussion](https://gnusha.org/pi/bitcoindev/aDWfDI03I-Rakopb%40petertodd.org)
-- [Garbageman source repository](https://github.com/chrisguida/bitcoin/tree/garbageman-v29)
+A: The system identifies Libre Relay nodes by checking service bit 29 (0x20000000). This helps track how many spam-relaying nodes are on the network.
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Container/VM Won't Start
+### WebUI Issues
 
-**For Containers:**
+**Services won't start:**
 ```bash
-# Check Docker/Podman status
-sudo systemctl status docker   # or: systemctl status podman
-sudo systemctl start docker    # or: systemctl start podman
+cd devtools
+make logs  # Check all service logs
 
-# Check container logs
-docker logs gm-base            # or: podman logs gm-base
+# Check individual services
+make ui
+make api
+make supervisor
+make tor
 ```
 
-**For VMs:**
-Check libvirt service:
+**Can't connect to API:**
 ```bash
+# Verify API is running
+curl http://localhost:8080/api/health
+
+# Check Docker network
+docker network ls
+docker network inspect garbageman-network
+```
+
+**Peer discovery not working:**
+```bash
+# Check Tor proxy status
+curl http://localhost:8080/api/peers/tor/status
+
+# Verify Tor container
+docker logs gm-tor-proxy
+
+# Test Tor connectivity
+curl --socks5 localhost:9050 http://check.torproject.org
+```
+
+### TUI Script Issues
+
+**Container/VM won't start:**
+
+For containers:
+```bash
+# Check Docker/Podman
+sudo systemctl status docker
+docker logs gm-base
+
+# Verify container exists
+docker ps -a | grep gm
+```
+
+For VMs:
+```bash
+# Check libvirt
 sudo systemctl status libvirtd
-sudo systemctl start libvirtd
-```
 
-Check default network:
-```bash
+# Verify default network
 virsh net-list --all
 virsh net-start default
+
+# Check VM console
+virsh console gm-base
 ```
 
-### Sync Stuck at 0%
+**Sync stuck at 0%:**
 
-**Verify bitcoind is running:**
-
-**For Containers:**
+Verify bitcoind is running:
 ```bash
-# Check if container is running
-docker ps | grep gm-base       # or: podman ps | grep gm-base
-
-# Check bitcoind process
+# Containers
 docker exec gm-base ps aux | grep bitcoind
-
-# View logs
 docker exec gm-base tail -f /var/lib/bitcoin/debug.log
+
+# VMs
+ssh root@<VM_IP> ps aux | grep bitcoind
+ssh root@<VM_IP> tail -f /var/lib/bitcoin/debug.log
 ```
 
-**For VMs:**
+Check network connectivity:
 ```bash
-# Get VM IP
-virsh domifaddr gm-base
-
-# SSH and check
-ssh root@<VM_IP>
-ps aux | grep bitcoind
-tail -f /var/lib/bitcoin/debug.log
-```
-
-**Check network connectivity (inside container/VM):**
-```bash
-# For containers
+# Containers
 docker exec gm-base ping -c 3 8.8.8.8
-docker exec gm-base curl https://icanhazip.com
 
-# For VMs (via SSH)
-ping 8.8.8.8
-curl https://icanhazip.com
+# VMs
+ssh root@<VM_IP> ping -c 3 8.8.8.8
 ```
 
-### Build Failed During Compilation
+**Build failed during compilation:**
 
-**Check system resources:**
-- Build needs at least 2 GB RAM
-- Check available memory: `free -h`
-- Close other programs and try again
-
-**Clean up and retry:**
-
-**For Containers:**
+Check resources and retry:
 ```bash
-docker stop gm-base ; docker rm gm-base
+# Need at least 2GB RAM free
+free -h
+
+# Clean and start fresh
+# Containers
+docker stop gm-base; docker rm gm-base
 docker volume rm garbageman-data
 docker system prune -f
-./garbageman-nm.sh  # Start fresh
-```
 
-**For VMs:**
-```bash
-sudo rm -f /var/lib/libvirt/images/gm-base.qcow2
+# VMs
 virsh undefine gm-base
-./garbageman-nm.sh  # Start fresh
+sudo rm -f /var/lib/libvirt/images/gm-base.qcow2
+
+# Try again
+./garbageman-nm.sh
 ```
 
-### Can't SSH into VM
+**Tor not starting in container:**
 
-**The script handles SSH automatically for VMs**, but if you need to manually connect:
-
+Likely caused by old host networking mode. Recreate with bridge networking:
 ```bash
-# Use the monitoring key
-ssh -i ~/.cache/gm-monitor/gm_monitor_ed25519 root@<VM_IP>
-```
-
-**Note:** SSH is only used for VMs. Containers use `docker exec` or `podman exec` instead.
-
-### Tor Not Starting in Container
-
-**Symptoms:** Monitor shows "Tor: not running" or "Tor: starting" indefinitely
-
-**Cause:** This can happen if:
-1. Your host system runs Tor and container was created with old host networking mode
-2. Container was imported from an older version of the script
-
-**Solution:** Recreate container with proper network isolation:
-
-```bash
-# Remove old container and volume
 docker rm -f gm-base
 docker volume rm garbageman-data
-
-# Re-import or rebuild (will use bridge networking)
 ./garbageman-nm.sh
-# Choose: Create Base Container → Import from file (or Import from GitHub)
+# Re-import or rebuild
 ```
 
-**Verify Tor is working:**
+Verify Tor works:
 ```bash
-# Check if Tor process is running
 docker exec gm-base ps aux | grep tor
-
-# Check Tor logs
-docker logs gm-base 2>&1 | grep -i tor
-
-# Verify .onion address was created
 docker exec gm-base cat /var/lib/tor/bitcoin-service/hostname
-```
-
-**Why this happens:** Older versions used host networking which caused port conflicts. Current version uses bridge networking with isolated network namespaces.
-
----
-
-## 🛠️ Advanced Usage
-
-### Manual Resource Adjustment
-
-**For Containers:**
-Containers can be adjusted on-the-fly:
-```bash
-# Update CPU/RAM limits (Docker)
-docker update --cpus="2" --memory="4g" gm-base
-
-# Update CPU/RAM limits (Podman)
-podman update --cpus="2" --memory="4g" gm-base
-```
-
-**For VMs:**
-Between Action 1 (Create) and Action 2 (Sync), you can manually adjust VM resources:
-
-```bash
-# Check current resources
-virsh dominfo gm-base
-
-# Change vCPUs (VM must be shut off)
-virsh setvcpus gm-base 4 --config --maximum
-virsh setvcpus gm-base 4 --config
-
-# Change RAM (in KiB, so 8 GB = 8388608 KiB)
-virsh setmaxmem gm-base 8388608 --config
-virsh setmem gm-base 8388608 --config
-```
-
-**Or just use Action 2's built-in prompt!** It's easier and safer.
-
-### Environment Variable Overrides
-
-Customize script behavior before running:
-
-```bash
-# Use different base name
-VM_NAME=my-bitcoin-node ./garbageman-nm.sh           # For VMs
-CONTAINER_NAME=my-bitcoin-node ./garbageman-nm.sh    # For Containers
-
-# Change default runtime resources
-VM_VCPUS=2 VM_RAM_MB=4096 ./garbageman-nm.sh                    # For VMs
-CONTAINER_RUNTIME_CPUS=2 CONTAINER_RUNTIME_RAM=4096 ./garbageman-nm.sh  # For Containers
-
-# Change disk size (VMs only, containers use volumes)
-VM_DISK_GB=50 ./garbageman-nm.sh
-
-# Force Tor-only on base container/VM
-CLEARNET_OK=no ./garbageman-nm.sh
-```
-
-### Using a Different Garbageman Branch
-
-```bash
-GM_BRANCH=my-custom-branch ./garbageman-nm.sh
 ```
 
 ### Diagnostic Tools
 
-If your Base Container/VM isn't starting correctly or bitcoind isn't running, use the diagnostic script to check system health:
-
+**For TUI base instances:**
 ```bash
 ./devtools/diagnose-gm-base.sh
 ```
 
-**This tool checks:**
-- Container/VM power state and IP address assignment
-- Network connectivity (can container/VM reach internet?)
-- SSH accessibility with monitoring key (VMs only)
-- Required binaries (bitcoind, bitcoin-cli, tor)
-- Running processes (bitcoind and tor daemons)
-- Service status (systemd for containers, OpenRC for VMs)
-- First-boot completion flag
-- Bitcoin configuration settings
-- Data directory structure and permissions
-- Blockchain sync status (if bitcoind is running)
+Checks:
+- Instance power state and IP
+- Network connectivity
+- SSH access (VMs) / exec access (containers)
+- Required binaries (bitcoind, tor)
+- Running processes and services
+- Data directory structure
+- Blockchain sync status
 
-**When to use it:**
-- Container/VM won't start or keeps shutting down
-- Action 2 (Monitor Sync) shows errors connecting
-- Action 3 (Manage Base Container/VM) can't gather .onion address or block height
-- After using `delete-gm-base.sh` to verify clean state
-- Before reporting bugs to confirm system health
-
-**Example output:**
+**For WebUI:**
+```bash
+cd devtools
+make logs  # All services
 ```
-[✓] Container/VM is running
-[✓] IP address: 192.168.122.123 / 172.17.0.2
-[✓] Network connectivity OK
-[✓] SSH access working (VMs) / Exec access working (Containers)
-[✓] bitcoind binary found
-[✓] tor binary found
-[✓] bitcoind process running (PID 1234)
-[✓] tor process running (PID 1235)
-[✓] bitcoind service enabled
-[✓] tor service enabled
-[✓] First boot completed
-[✓] Bitcoin data directory exists
-[✓] Blockchain sync: 12345/850000 blocks (1.45%)
-```
-
-If any checks fail, the script provides troubleshooting commands specific to that issue.
 
 ---
 
-## 📚 Additional Resources
+## 📚 Documentation
 
-- **Garbageman Repository:** [github.com/chrisguida/bitcoin](https://github.com/chrisguida/bitcoin)
-- **Bitcoin Core Documentation:** [bitcoin.org/en/developer-documentation](https://bitcoin.org/en/developer-documentation)
-- **Libvirt Documentation:** [libvirt.org/docs.html](https://libvirt.org/docs.html)
-- **Tor Hidden Services:** [community.torproject.org](https://community.torproject.org)
+- **[QUICKSTART.md](QUICKSTART.md)** - Quick start guide for WebUI
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - How to contribute to the project
+- **[docs/TOR_PEER_DISCOVERY.md](docs/TOR_PEER_DISCOVERY.md)** - Tor peer discovery technical details
+- **[RELEASE_GUIDE.md](RELEASE_GUIDE.md)** - Creating GitHub releases with TUI script
+- **[webui/README.md](webui/README.md)** - WebUI architecture documentation
+- **[webui/api/README.md](webui/api/README.md)** - API documentation
+- **[multi-daemon/README.md](multi-daemon/README.md)** - Supervisor documentation
 
 ---
 
 ## 🤝 Contributing
 
-Found a bug or have a feature request? Please open an issue on GitHub!
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
-Want to contribute code? Pull requests are welcome!
+- Code style guidelines (TypeScript, React, Bash)
+- Testing requirements
+- Pull request process
+- Component-specific guidelines
+
+**Quick start for contributors:**
+```bash
+git clone https://github.com/paulscode/garbageman-nm.git
+cd garbageman-nm/devtools
+make up
+# Start developing!
+```
 
 ---
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
 - **Garbageman:** Bitcoin Knots fork by [Chris Guida](https://github.com/chrisguida)
-- **Alpine Linux:** Lightweight VM OS
-- **Libvirt/QEMU:** Virtualization stack
-- **Tor Project:** Privacy layer
+- **Bitcoin Knots:** Bitcoin Core fork by [Luke Dashjr](https://github.com/luke-jr)
+- **Libre Relay:** By [Peter Todd](https://github.com/petertodd) - though we're fighting spam, we respect the technical implementation
+- **Alpine Linux:** Lightweight OS for containers and VMs
+- **Tor Project:** Privacy layer enabling .onion hidden services
+- **Start9 & Umbrel:** Inspiration for embedded platform design
 
 ---
 
@@ -1257,8 +1152,19 @@ This is experimental software. Use at your own risk. Always keep backups of impo
 
 Running Bitcoin nodes requires significant resources and bandwidth. Ensure you understand the implications before running multiple nodes.
 
+The Garbageman implementation is designed to combat blockchain spam. While effective, it operates in a gray area of network policy. Use responsibly and understand the technical and ethical implications.
+
 ---
 
-**Questions? Issues?** Open a GitHub issue or reach out to the community!
+## 🔗 Links
 
-**Happy noding! 🚀**
+- **Repository:** [github.com/paulscode/garbageman-nm](https://github.com/paulscode/garbageman-nm)
+- **Garbageman Source:** [github.com/chrisguida/bitcoin](https://github.com/chrisguida/bitcoin)
+- **Bitcoin Knots:** [bitcoinknots.org](https://bitcoinknots.org)
+- **Issues:** [github.com/paulscode/garbageman-nm/issues](https://github.com/paulscode/garbageman-nm/issues)
+
+---
+
+**Questions? Issues? Ideas?** Open a GitHub issue or join the discussion!
+
+**Happy noding! 🚀☢️**
