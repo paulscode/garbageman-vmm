@@ -38,12 +38,12 @@ export function RadioactiveBadge({
     <div
       className={cn('inline-flex items-center justify-center', glowClass, className)}
       role="img"
-      aria-label="Radioactive symbol"
+      aria-label="Nuclear symbol"
     >
       <svg
         width={dimension}
         height={dimension}
-        viewBox="0 0 24 24"
+        viewBox="0 0 122.88 122.88"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
@@ -58,36 +58,38 @@ export function RadioactiveBadge({
           </filter>
         </defs>
         
-        {/* Radioactive symbol: center circle + 3 blades */}
+        {/* Nuclear symbol from download2.svg */}
         <g filter={`url(#glow-${intensity})`}>
-          {/* Center circle */}
-          <circle
-            cx="12"
-            cy="12"
-            r="2.5"
+          {/* Outer circle */}
+          <path 
+            d="M61.44,0A61.46,61.46,0,1,1,18,18,61.21,61.21,0,0,1,61.44,0Z" 
             fill="var(--acc-orange)"
             className="animate-pulse-glow"
           />
-          
-          {/* Blade 1 (top) */}
-          <path
-            d="M 12 9 L 9 3 A 9 9 0 0 1 15 3 L 12 9 Z"
-            fill="var(--acc-orange)"
-            opacity="0.8"
+          {/* Inner circle */}
+          <path 
+            d="M61.44,6.67A54.77,54.77,0,1,1,6.67,61.44,54.77,54.77,0,0,1,61.44,6.67Z" 
+            fill="var(--bg0)"
           />
-          
-          {/* Blade 2 (bottom-left) */}
-          <path
-            d="M 10.5 13.5 L 3 17 A 9 9 0 0 0 6 21 L 10.5 13.5 Z"
+          {/* Center dot */}
+          <path 
+            d="M61.5,53.07a8.95,8.95,0,1,1-9,8.94,8.95,8.95,0,0,1,9-8.94Z" 
             fill="var(--acc-orange)"
-            opacity="0.8"
           />
-          
-          {/* Blade 3 (bottom-right) */}
-          <path
-            d="M 13.5 13.5 L 18 21 A 9 9 0 0 0 21 17 L 13.5 13.5 Z"
+          {/* Left blade */}
+          <path 
+            d="M15.17,61.89C16,44.64,23.59,31.13,38.4,21.68L54.68,50.34c-3.85,2.16-6.09,6-6.68,11.55Z" 
             fill="var(--acc-orange)"
-            opacity="0.8"
+          />
+          {/* Top-right blade */}
+          <path 
+            d="M84.63,21.46c14.5,9.38,22.42,22.67,23.2,40.23l-33-.24c0-4.41-2.15-8.27-6.66-11.55L84.63,21.46Z" 
+            fill="var(--acc-orange)"
+          />
+          {/* Bottom blade */}
+          <path 
+            d="M84.87,101.71c-15.36,7.88-30.84,8.09-46.43,0L55.12,73.27c3.79,2.25,8.24,2.27,13.3,0l16.45,28.44Z" 
+            fill="var(--acc-orange)"
           />
         </g>
       </svg>

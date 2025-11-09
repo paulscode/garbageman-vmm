@@ -1,3 +1,6 @@
+'use client';
+
+import { API_BASE_URL } from '@/lib/api-config';
 /**
  * ImportArtifactModal Component
  * ==============================
@@ -10,8 +13,6 @@
  *  - File upload with drag-and-drop
  *  - Artifact may contain one or both implementations (detected at import)
  */
-
-'use client';
 
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
@@ -60,7 +61,7 @@ export function ImportArtifactModal({ isOpen, onClose, onSubmit, authenticatedFe
   useEffect(() => {
     if (isOpen && method === 'github' && releases.length === 0) {
       setLoadingReleases(true);
-      authenticatedFetch('http://localhost:8080/api/artifacts/github/releases')
+      authenticatedFetch(`${API_BASE_URL}/api/artifacts/github/releases`)
         .then(res => res.json())
         .then(data => {
           setReleases(data.releases || []);
@@ -371,6 +372,9 @@ export function ImportArtifactModal({ isOpen, onClose, onSubmit, authenticatedFe
                   </p>
                   <p className="text-xs text-tx3 font-mono mt-1">
                     🔍 Garbageman and Knots implementations auto-detected
+                  </p>
+                  <p className="text-xs text-acc-green font-mono mt-1 font-bold">
+                    ✓ Large file support: Files are uploaded in 5MB chunks to avoid timeouts
                   </p>
                   
                   {/* Tag */}

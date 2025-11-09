@@ -17,6 +17,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import * as crypto from 'crypto';
+import { Buffer } from 'buffer';
 
 // JWT token generation and validation
 // Using HMAC-SHA256 for simplicity (production should use proper JWT library)
@@ -192,7 +193,7 @@ export default async function authRoute(fastify: FastifyInstance) {
 }
 
 // Export middleware for protecting routes
-export function requireAuth(fastify: FastifyInstance) {
+export function requireAuth(_fastify: FastifyInstance) {
   return async (request: any, reply: any) => {
     const token = extractToken(request.headers.authorization);
     

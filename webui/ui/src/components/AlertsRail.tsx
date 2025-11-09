@@ -1,3 +1,6 @@
+'use client';
+
+import { API_BASE_URL } from '@/lib/api-config';
 /**
  * AlertsRail Component
  * =====================
@@ -11,7 +14,6 @@
  *  - success: Positive event (green)
  */
 
-'use client';
 
 import { cn } from '@/lib/utils';
 import { useState, useEffect } from 'react';
@@ -23,7 +25,7 @@ interface Alert {
   message: string;
   timestamp: number;
   category?: string;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
 }
 
 interface AlertsRailProps {
@@ -53,7 +55,7 @@ export function AlertsRail({ className, authenticatedFetch }: AlertsRailProps) {
   useEffect(() => {
     const fetchEvents = async () => {
       try {
-        const response = await authenticatedFetch('http://localhost:8080/api/events?limit=20');
+        const response = await authenticatedFetch(`${API_BASE_URL}/api/events?limit=20`);
         const data = await response.json();
         setAlerts(data.events || []);
       } catch (error) {
@@ -68,7 +70,7 @@ export function AlertsRail({ className, authenticatedFetch }: AlertsRailProps) {
     const interval = setInterval(fetchEvents, 10000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [authenticatedFetch]);
   const getAlertStyles = (type: Alert['type']) => {
     switch (type) {
       case 'success':

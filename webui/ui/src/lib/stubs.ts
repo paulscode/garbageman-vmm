@@ -160,7 +160,7 @@ export const mockAPI = {
     return stubInstances.find((i) => i.config.INSTANCE_ID === id) || null;
   },
 
-  async createInstance(data: Partial<InstanceDetail['config']>): Promise<{ success: boolean; instanceId: string }> {
+  async createInstance(_data: Partial<InstanceDetail['config']>): Promise<{ success: boolean; instanceId: string }> {
     await delay(500);
     return {
       success: true,
@@ -168,7 +168,7 @@ export const mockAPI = {
     };
   },
 
-  async deleteInstance(id: string): Promise<{ success: boolean }> {
+  async deleteInstance(_id: string): Promise<{ success: boolean }> {
     await delay(400);
     return { success: true };
   },

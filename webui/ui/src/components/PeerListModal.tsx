@@ -1,11 +1,12 @@
+'use client';
+
+import { API_BASE_URL } from '@/lib/api-config';
 /**
  * Peer List Modal
  * ================
  * Displays discovered Bitcoin peers categorized by capabilities
  * (Libre Relay, Core v30+, All peers)
  */
-
-'use client';
 
 import { useEffect, useState } from 'react';
 
@@ -114,6 +115,7 @@ export function PeerListModal({ isOpen, onClose, authenticatedFetch }: PeerListM
       }, 5000);
       return () => clearInterval(interval);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
   // Poll for status updates every second
@@ -123,6 +125,7 @@ export function PeerListModal({ isOpen, onClose, authenticatedFetch }: PeerListM
       const interval = setInterval(loadStatus, 1000);
       return () => clearInterval(interval);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
   // Countdown timer
@@ -134,7 +137,7 @@ export function PeerListModal({ isOpen, onClose, authenticatedFetch }: PeerListM
 
   const loadStatus = async () => {
     try {
-      const response = await authenticatedFetch('http://localhost:8080/api/peers/status');
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/peers/status`);
       const data = await response.json();
       setDiscoveryStatus(data);
     } catch (error) {
@@ -145,7 +148,7 @@ export function PeerListModal({ isOpen, onClose, authenticatedFetch }: PeerListM
   const loadSeedChecks = async () => {
     try {
       // Request up to 200 most recent checks (reasonable limit for UI)
-      const response = await authenticatedFetch('http://localhost:8080/api/peers/seeds?limit=200');
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/peers/seeds?limit=200`);
       const data = await response.json();
       setSeedChecks(data.checks || []);
     } catch (error) {
@@ -156,7 +159,7 @@ export function PeerListModal({ isOpen, onClose, authenticatedFetch }: PeerListM
   const loadPeers = async () => {
     try {
       setLoading(true);
-      const response = await authenticatedFetch('http://localhost:8080/api/peers');
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/peers`);
       const data = await response.json();
       
       // Combine clearnet and tor peers
@@ -766,7 +769,7 @@ export function PeerListModal({ isOpen, onClose, authenticatedFetch }: PeerListM
               
               {/* Scrollable peer list with max height */}
               <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2">
-                {currentPeers.map((peer: DiscoveredPeer, index: number) => {
+                {currentPeers.map((peer: DiscoveredPeer, _index: number) => {
                   const peerAddress = peer.ip || peer.host || 'unknown';
                   return (
                     <div

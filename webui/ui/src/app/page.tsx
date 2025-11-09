@@ -7,6 +7,7 @@
 
 'use client';
 
+import { API_BASE_URL } from '@/lib/api-config';
 import { useState, useEffect, useRef } from 'react';
 import { CommandBar } from '@/components/CommandBar';
 import { StatusBoard } from '@/components/StatusBoard';
@@ -66,6 +67,16 @@ interface InstanceDetail {
   status: InstanceStatus;
 }
 
+interface ApiArtifact {
+  tag: string;
+  hasGarbageman: boolean;
+  hasKnots: boolean;
+  hasContainer: boolean;
+  hasBlockchain: boolean;
+  path: string;
+  importedAt: string;
+}
+
 export default function HomePage() {
   const [isLocked, setIsLocked] = useState(true); // Start locked
   const [isAuthenticating, setIsAuthenticating] = useState(false); // Loading screen during auth
@@ -85,6 +96,11 @@ export default function HomePage() {
   const [importingArtifact, setImportingArtifact] = useState<string | null>(null);
   const importProgressToastId = useRef<string | null>(null);
   const importProgressInterval = useRef<NodeJS.Timeout | null>(null);
+  
+  // Instance creation progress tracking
+  const [extractingInstance, setExtractingInstance] = useState<string | null>(null);
+  const extractionProgressToastId = useRef<string | null>(null);
+  const extractionProgressInterval = useRef<NodeJS.Timeout | null>(null);
   
   // Artifacts (fetched from API)
   const [artifacts, setArtifacts] = useState<Array<{
@@ -134,7 +150,7 @@ export default function HomePage() {
         if (showLoading) setLoading(true);
         
         // Fetch from real API with authentication
-        const response = await authenticatedFetch('http://localhost:8080/api/instances');
+        const response = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
         if (!response.ok) {
           throw new Error(`API error: ${response.status}`);
         }
@@ -156,7 +172,7 @@ export default function HomePage() {
     // Fetch version from health endpoint
     const fetchVersion = async () => {
       try {
-        const response = await fetch('http://localhost:8080/api/health');
+        const response = await fetch(`${API_BASE_URL}/api/health`);
         if (response.ok) {
           const data = await response.json();
           if (data.version) {
@@ -182,14 +198,14 @@ export default function HomePage() {
       if (isLocked) return;
       
       try {
-        const response = await authenticatedFetch('http://localhost:8080/api/artifacts');
+        const response = await authenticatedFetch(`${API_BASE_URL}/api/artifacts`);
         if (!response.ok) {
           throw new Error(`API error: ${response.status}`);
         }
         const data = await response.json();
         
         // Transform API response to match our interface
-        const transformedArtifacts = data.artifacts.map((a: any) => ({
+        const transformedArtifacts = data.artifacts.map((a: ApiArtifact) => ({
           id: `artifact-${a.tag}`,
           name: a.tag,
           implementations: [
@@ -216,7 +232,7 @@ export default function HomePage() {
     console.log('Start instance:', id);
     
     try {
-      const response = await authenticatedFetch(`http://localhost:8080/api/instances/${id}/start`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/instances/${id}/start`, {
         method: 'POST',
       });
       
@@ -228,7 +244,7 @@ export default function HomePage() {
       console.log('Instance started:', result);
       
       // Reload instances to reflect new state
-      const listResponse = await authenticatedFetch('http://localhost:8080/api/instances');
+      const listResponse = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
       const listData = await listResponse.json();
       setInstances(listData.instances);
       
@@ -243,7 +259,7 @@ export default function HomePage() {
     console.log('Stop instance:', id);
     
     try {
-      const response = await authenticatedFetch(`http://localhost:8080/api/instances/${id}/stop`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/instances/${id}/stop`, {
         method: 'POST',
       });
       
@@ -255,7 +271,7 @@ export default function HomePage() {
       console.log('Instance stopped:', result);
       
       // Reload instances to reflect new state
-      const listResponse = await authenticatedFetch('http://localhost:8080/api/instances');
+      const listResponse = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
       const listData = await listResponse.json();
       setInstances(listData.instances);
       
@@ -272,7 +288,7 @@ export default function HomePage() {
     if (!confirmed) return;
     
     try {
-      const response = await authenticatedFetch(`http://localhost:8080/api/instances/${id}`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/instances/${id}`, {
         method: 'DELETE',
       });
       
@@ -339,7 +355,7 @@ export default function HomePage() {
     
     try {
       // Call API to create instance (use tag name, not the transformed ID)
-      const response = await authenticatedFetch('http://localhost:8080/api/instances', {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/instances`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -364,11 +380,124 @@ export default function HomePage() {
       const result = await response.json();
       console.log('Instance created:', result);
       
+      // Check if blockchain extraction is in progress (202 status)
+      if (response.status === 202) {
+        // Blockchain extraction is happening in background
+        // Update the progress toast and start polling
+        dismissToast(progressToastId);
+        
+        const toastId = addToast(
+          'info',
+          `Creating ${result.instanceId}`,
+          'Extracting blockchain data - this may take 10-30 minutes',
+          { 
+            duration: 0, // Don't auto-dismiss
+            showProgress: true, // Show animated indeterminate bar
+          }
+        );
+        extractionProgressToastId.current = toastId;
+        setExtractingInstance(result.instanceId);
+        
+        // Start polling for extraction progress
+        extractionProgressInterval.current = setInterval(async () => {
+          try {
+            const progressResponse = await authenticatedFetch(
+              `${API_BASE_URL}/api/instances/extraction/progress/${result.instanceId}`
+            );
+            
+            if (!progressResponse.ok) {
+              // Extraction might be complete
+              if (progressResponse.status === 404) {
+                // Check if instance exists now (extraction complete)
+                const instancesResponse = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
+                const instancesData = await instancesResponse.json();
+                const created = instancesData.instances.find((i: any) => i.config.INSTANCE_ID === result.instanceId);
+                
+                if (created) {
+                  // Extraction completed!
+                  if (extractionProgressInterval.current) {
+                    clearInterval(extractionProgressInterval.current);
+                    extractionProgressInterval.current = null;
+                  }
+                  
+                  dismissToast(toastId);
+                  addToast(
+                    'success',
+                    'Instance Ready!',
+                    `${result.instanceId} has been created with blockchain data`,
+                    { duration: 10000 }
+                  );
+                  
+                  // Reload instances
+                  setInstances(instancesData.instances);
+                  setExtractingInstance(null);
+                }
+              }
+              return;
+            }
+            
+            const progress = await progressResponse.json();
+            console.log('Extraction progress:', progress);
+            
+            // Update toast with current status
+            updateToast(toastId, {
+              title: `Creating ${result.instanceId}`,
+              message: progress.message || 'Extracting blockchain data...',
+            });
+            
+            // Check if complete or error
+            if (progress.status === 'complete') {
+              if (extractionProgressInterval.current) {
+                clearInterval(extractionProgressInterval.current);
+                extractionProgressInterval.current = null;
+              }
+              
+              dismissToast(toastId);
+              addToast(
+                'success',
+                'Instance Ready!',
+                `${result.instanceId} has been created with blockchain data`,
+                { duration: 10000 }
+              );
+              
+              // Reload instances
+              const instancesResponse = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
+              const instancesData = await instancesResponse.json();
+              setInstances(instancesData.instances);
+              setExtractingInstance(null);
+            } else if (progress.status === 'error') {
+              if (extractionProgressInterval.current) {
+                clearInterval(extractionProgressInterval.current);
+                extractionProgressInterval.current = null;
+              }
+              
+              dismissToast(toastId);
+              addToast(
+                'warning',
+                'Extraction Failed',
+                `${result.instanceId} was created but blockchain extraction failed. Instance will sync from scratch.`,
+                { duration: 15000 }
+              );
+              
+              // Reload instances
+              const instancesResponse = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
+              const instancesData = await instancesResponse.json();
+              setInstances(instancesData.instances);
+              setExtractingInstance(null);
+            }
+          } catch (pollError) {
+            console.error('Failed to poll extraction progress:', pollError);
+          }
+        }, 3000); // Poll every 3 seconds
+        
+        return;
+      }
+      
       // Dismiss progress toast
       dismissToast(progressToastId);
       
       // Reload instances to show the new one
-      const listResponse = await authenticatedFetch('http://localhost:8080/api/instances');
+      const listResponse = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
       const listData = await listResponse.json();
       setInstances(listData.instances);
       
@@ -403,7 +532,7 @@ export default function HomePage() {
         importProgressToastId.current = toastId;
         
         // Start import and check response
-        authenticatedFetch('http://localhost:8080/api/artifacts/github/import', {
+        authenticatedFetch(`${API_BASE_URL}/api/artifacts/github/import`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -429,7 +558,7 @@ export default function HomePage() {
               setImportingArtifact(null);
               
               // Reload artifacts
-              const artifactsResponse = await authenticatedFetch('http://localhost:8080/api/artifacts');
+              const artifactsResponse = await authenticatedFetch(`${API_BASE_URL}/api/artifacts`);
               const artifactsData = await artifactsResponse.json();
               const transformedArtifacts = artifactsData.artifacts.map((a: any) => ({
                 id: `artifact-${a.tag}`,
@@ -476,7 +605,7 @@ export default function HomePage() {
         importProgressInterval.current = setInterval(async () => {
           try {
             const progressResponse = await authenticatedFetch(
-              `http://localhost:8080/api/artifacts/import/progress/${data.releaseTag}`
+              `${API_BASE_URL}/api/artifacts/import/progress/${data.releaseTag}`
             );
             
             console.log('Progress poll response status:', progressResponse.status);
@@ -485,7 +614,7 @@ export default function HomePage() {
               // Import might be complete or not started yet
               if (progressResponse.status === 404) {
                 // Check if artifact exists now (import complete)
-                const artifactsResponse = await authenticatedFetch('http://localhost:8080/api/artifacts');
+                const artifactsResponse = await authenticatedFetch(`${API_BASE_URL}/api/artifacts`);
                 const artifactsData = await artifactsResponse.json();
                 const imported = artifactsData.artifacts.find((a: any) => a.tag === data.releaseTag);
                 
@@ -554,7 +683,7 @@ export default function HomePage() {
               );
               
               // Reload artifacts
-              const artifactsResponse = await authenticatedFetch('http://localhost:8080/api/artifacts');
+              const artifactsResponse = await authenticatedFetch(`${API_BASE_URL}/api/artifacts`);
               const artifactsData = await artifactsResponse.json();
               const transformedArtifacts = artifactsData.artifacts.map((a: any) => ({
                 id: `artifact-${a.tag}`,
@@ -585,89 +714,146 @@ export default function HomePage() {
         }, 1000); // Poll every second
         
       } else if (data.method === 'upload' && data.file) {
-        // File upload method
+        // File upload method - use chunked upload to avoid gateway timeouts
         setShowImportArtifactModal(false);
         
-        const uploadToastId = addToast(
+        const file = data.file;
+        const tag = data.tag || 'unknown';
+        const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB chunks (good balance between reliability and efficiency)
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const uploadId = `upload-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        
+        const progressToastId = addToast(
           'progress',
           'Uploading Artifact',
-          `Uploading ${data.file.name}...`,
-          { showProgress: true } // Use indeterminate progress since we can't track upload progress
+          `Uploading ${file.name} in ${totalChunks} chunks...`,
+          { progress: 0 }
         );
         
         try {
-          // Create FormData for file upload
-          // IMPORTANT: Append tag BEFORE file so multipart parser captures it
-          const formData = new FormData();
-          formData.append('tag', data.tag || 'unknown');
-          formData.append('file', data.file);
-          
-          console.log('About to send fetch request to /api/artifacts/import');
-          console.log('FormData contents:', { file: data.file.name, tag: data.tag || 'unknown' });
-          
-          // Upload file - use direct API URL to bypass Next.js proxy size limits
-          // For large files, Next.js proxy can truncate the upload
-          const apiUrl = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
-          const uploadResponse = await authenticatedFetch(`${apiUrl}/api/artifacts/import`, {
-            method: 'POST',
-            body: formData,
-          });
-          
-          console.log('Fetch completed, response status:', uploadResponse.status);
-          
-          dismissToast(uploadToastId);
-          
-          if (!uploadResponse.ok) {
-            const errorData = await uploadResponse.json();
-            addToast(
-              'error',
-              'Upload Failed',
-              errorData.message || 'Failed to upload artifact',
-              { duration: 12000 }
-            );
-            return;
+          // Upload chunks sequentially
+          for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+            const start = chunkIndex * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            const formData = new FormData();
+            formData.append('uploadId', uploadId);
+            formData.append('tag', tag);
+            formData.append('filename', file.name);
+            formData.append('chunkIndex', chunkIndex.toString());
+            formData.append('totalChunks', totalChunks.toString());
+            formData.append('file', chunk, `chunk-${chunkIndex}`);
+            
+            const percentComplete = Math.round((chunkIndex / totalChunks) * 100);
+            updateToast(progressToastId, {
+              title: 'Uploading Artifact',
+              message: `Uploading chunk ${chunkIndex + 1}/${totalChunks}`,
+              progress: percentComplete,
+            });
+            
+            const apiUrl = process.env.NEXT_PUBLIC_API_BASE || `${API_BASE_URL}`;
+            const chunkResponse = await authenticatedFetch(`${apiUrl}/api/artifacts/import/chunk`, {
+              method: 'POST',
+              body: formData,
+            });
+            
+            if (!chunkResponse.ok) {
+              const errorData = await chunkResponse.json();
+              throw new Error(errorData.message || 'Chunk upload failed');
+            }
+            
+            await chunkResponse.json();
+            
+            // If this was the last chunk, server returns 202 and starts processing
+            if (chunkResponse.status === 202) {
+              console.log('All chunks uploaded, server is assembling and processing');
+              
+              // Switch toast to processing phase (keep same toast ID)
+              updateToast(progressToastId, {
+                title: 'Processing Artifact',
+                message: 'Assembling uploaded file...',
+                progress: undefined, // Switch to indeterminate for assembly/extraction
+              });
+              
+              // Start polling for import progress
+              const pollInterval = setInterval(async () => {
+                try {
+                  const progressResponse = await authenticatedFetch(
+                    `${API_BASE_URL}/api/artifacts/import/progress/${tag}`
+                  );
+                  
+                  if (!progressResponse.ok) {
+                    console.error('Progress check failed:', progressResponse.status);
+                    clearInterval(pollInterval);
+                    dismissToast(progressToastId);
+                    addToast('error', 'Import Failed', 'Failed to check import progress');
+                    return;
+                  }
+                  
+                  const progressData = await progressResponse.json();
+                  console.log('Import progress:', progressData);
+                  
+                  updateToast(progressToastId, {
+                    title: 'Processing Artifact',
+                    message: progressData.message || `${progressData.status}...`,
+                  });
+                  
+                  if (progressData.status === 'complete') {
+                    clearInterval(pollInterval);
+                    dismissToast(progressToastId);
+                    
+                    addToast(
+                      'success',
+                      'Import Complete',
+                      `Artifact ${tag} imported successfully`,
+                      { duration: 10000 }
+                    );
+                    
+                    // Reload artifacts
+                    const artifactsResponse = await authenticatedFetch(`${API_BASE_URL}/api/artifacts`);
+                    const artifactsData = await artifactsResponse.json();
+                    const transformedArtifacts = artifactsData.artifacts.map((a: any) => ({
+                      id: `artifact-${a.tag}`,
+                      name: a.tag,
+                      implementations: [
+                        ...(a.hasGarbageman ? ['garbageman' as const] : []),
+                        ...(a.hasKnots ? ['knots' as const] : []),
+                      ],
+                      path: a.path,
+                      uploadedAt: a.importedAt,
+                      hasBlockchain: a.hasBlockchain || false,
+                    }));
+                    setArtifacts(transformedArtifacts);
+                  } else if (progressData.status === 'error') {
+                    clearInterval(pollInterval);
+                    dismissToast(progressToastId);
+                    
+                    addToast(
+                      'error',
+                      'Import Failed',
+                      progressData.error || 'Import failed',
+                      { duration: 12000 }
+                    );
+                  }
+                } catch (error) {
+                  clearInterval(pollInterval);
+                  dismissToast(progressToastId);
+                  console.error('Failed to check import progress:', error);
+                }
+              }, 3000);
+              
+              return;
+            }
           }
           
-          const result = await uploadResponse.json();
+          // Shouldn't reach here, but handle just in case
+          dismissToast(progressToastId);
+          addToast('error', 'Upload Error', 'Unexpected response from server');
           
-          if (result.success) {
-            const impls = [];
-            if (result.artifact?.hasGarbageman) impls.push('Garbageman');
-            if (result.artifact?.hasKnots) impls.push('Knots');
-            
-            addToast(
-              'success',
-              'Upload Complete',
-              `${result.artifact?.tag} imported with ${impls.join(' and ')}`,
-              { duration: 10000 }
-            );
-            
-            // Reload artifacts
-            const artifactsResponse = await authenticatedFetch('http://localhost:8080/api/artifacts');
-            const artifactsData = await artifactsResponse.json();
-            const transformedArtifacts = artifactsData.artifacts.map((a: any) => ({
-              id: `artifact-${a.tag}`,
-              name: a.tag,
-              implementations: [
-                ...(a.hasGarbageman ? ['garbageman' as const] : []),
-                ...(a.hasKnots ? ['knots' as const] : []),
-              ],
-              path: a.path,
-              uploadedAt: a.importedAt,
-              hasBlockchain: a.hasBlockchain || false,
-            }));
-            setArtifacts(transformedArtifacts);
-          } else {
-            addToast(
-              'error',
-              'Upload Failed',
-              result.message || 'Unknown error',
-              { duration: 12000 }
-            );
-          }
         } catch (error) {
-          dismissToast(uploadToastId);
-          console.error('File upload failed:', error);
+          dismissToast(progressToastId);
+          console.error('Upload error:', error);
           addToast(
             'error',
             'Upload Failed',
@@ -688,7 +874,7 @@ export default function HomePage() {
       const startTime = Date.now();
       
       // Call server-side authentication endpoint
-      const response = await fetch('http://localhost:8080/api/auth/login', {
+      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

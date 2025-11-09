@@ -2,8 +2,8 @@
   "name": "garbageman-multi-daemon",
   "version": "0.1.0",
   "description": "Multi-daemon supervisor for Garbageman Nodes Manager",
-  "type": "module",
   "scripts": {
+    "build": "tsc",
     "start": "tsx supervisor.stub.ts",
     "dev": "tsx watch supervisor.stub.ts"
   },

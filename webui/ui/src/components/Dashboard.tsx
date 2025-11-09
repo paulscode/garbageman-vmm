@@ -1,3 +1,6 @@
+'use client';
+
+import { API_BASE_URL } from '@/lib/api-config';
 /**
  * Dashboard Component
  * ===================
@@ -5,13 +8,9 @@
  * Shows sync progress, peer statistics, and resource usage.
  */
 
-'use client';
-
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import {
-  LineChart,
-  Line,
   PieChart,
   Pie,
   Cell,
@@ -21,27 +20,51 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
 } from 'recharts';
 
-interface Instance {
+interface InstanceStatus {
   id: string;
-  state: string;
-  impl: string;
+  state: 'running' | 'stopped' | 'up';
+  implementation: string;
   network: string;
-  peers: number;
   blocks: number;
   headers: number;
   progress: number;
+  peers: number;
   diskGb: number;
+  kpiTags?: string[];
   peerBreakdown?: {
-    libreRelay: number;
-    knots: number;
-    oldCore: number;
-    newCore: number;
-    other: number;
+    newCore?: number;
+    oldCore?: number;
+    knots?: number;
+    libreRelay?: number;
+    other?: number;
   };
+}
+
+interface Instance {
+  id: string;
+  state: 'running' | 'stopped';
+  implementation: string;
+  network: string;
+  blocks: number;
+  headers: number;
+  progress: number;
+  peers: number;
+  diskGb: number;
+  kpiTags?: string[];
+  peerBreakdown?: {
+    newCore?: number;
+    oldCore?: number;
+    knots?: number;
+    libreRelay?: number;
+    other?: number;
+  };
+}
+
+interface ApiInstanceItem {
+  status: InstanceStatus;
 }
 
 interface DashboardProps {
@@ -75,10 +98,10 @@ export function Dashboard({ className, authenticatedFetch }: DashboardProps) {
   useEffect(() => {
     const fetchInstances = async () => {
       try {
-        const response = await authenticatedFetch('http://localhost:8080/api/instances');
+        const response = await authenticatedFetch(`${API_BASE_URL}/api/instances`);
         const data = await response.json();
         // Map the API response to flat instance objects
-        const flatInstances = (data.instances || []).map((item: any) => ({
+        const flatInstances = (data.instances || []).map((item: ApiInstanceItem) => ({
           ...item.status,
           // Ensure state is consistent ('up' -> 'running')
           state: item.status.state === 'up' ? 'running' : item.status.state,
@@ -95,7 +118,7 @@ export function Dashboard({ className, authenticatedFetch }: DashboardProps) {
     const interval = setInterval(fetchInstances, 5000); // Update every 5s
 
     return () => clearInterval(interval);
-  }, []);
+  }, [authenticatedFetch]);
 
   // Calculate aggregate metrics
   const totalInstances = instances.length;

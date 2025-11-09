@@ -11,8 +11,6 @@ import { promisify } from 'util';
 import net from 'net';
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
-import fs from 'fs/promises';
-import path from 'path';
 import { SocksClient } from 'socks';
 
 const dnsResolve4 = promisify(dns.resolve4);
@@ -300,35 +298,35 @@ class PeerDiscoveryService extends EventEmitter {
     // Mark as queried to avoid duplicates
     this.queriedPeers.add(peerKey);
     
-    return new Promise(async (resolve) => {
-      const isOnion = ip.endsWith('.onion');
-      let socket: net.Socket;
-      
-      try {
-        if (isOnion) {
-          const socksOptions = {
-            proxy: {
-              host: TOR_PROXY_HOST,
-              port: TOR_PROXY_PORT,
-              type: 5 as const,
-            },
-            command: 'connect' as const,
-            destination: {
-              host: ip,
-              port: port,
-            },
-            timeout: TOR_CONNECTION_TIMEOUT,
-          };
-          const info = await SocksClient.createConnection(socksOptions);
-          socket = info.socket;
-        } else {
-          socket = new net.Socket();
-          socket.connect(port, ip);
-        }
-      } catch (error) {
-        resolve([]);
-        return;
+    const isOnion = ip.endsWith('.onion');
+    let socket: net.Socket;
+    
+    try {
+      if (isOnion) {
+        const socksOptions = {
+          proxy: {
+            host: TOR_PROXY_HOST,
+            port: TOR_PROXY_PORT,
+            type: 5 as const,
+          },
+          command: 'connect' as const,
+          destination: {
+            host: ip,
+            port: port,
+          },
+          timeout: TOR_CONNECTION_TIMEOUT,
+        };
+        const info = await SocksClient.createConnection(socksOptions);
+        socket = info.socket;
+      } else {
+        socket = new net.Socket();
+        socket.connect(port, ip);
       }
+    } catch (error) {
+      return [];
+    }
+    
+    return new Promise((resolve) => {
 
       const addresses: Array<{ip: string, port: number}> = [];
       let buffer = Buffer.alloc(0);
@@ -405,38 +403,38 @@ class PeerDiscoveryService extends EventEmitter {
     const peerKey = `${ip}:${port}`;
     const isOnion = ip.endsWith('.onion');
     
-    return new Promise(async (resolve) => {
-      let socket: net.Socket;
-      
-      try {
-        if (isOnion) {
-          // Use SOCKS proxy for .onion addresses
-          const socksOptions = {
-            proxy: {
-              host: TOR_PROXY_HOST,
-              port: TOR_PROXY_PORT,
-              type: 5 as const,
-            },
-            command: 'connect' as const,
-            destination: {
-              host: ip,
-              port: port,
-            },
-            timeout: TOR_CONNECTION_TIMEOUT,
-          };
+    let socket: net.Socket;
+    
+    try {
+      if (isOnion) {
+        // Use SOCKS proxy for .onion addresses
+        const socksOptions = {
+          proxy: {
+            host: TOR_PROXY_HOST,
+            port: TOR_PROXY_PORT,
+            type: 5 as const,
+          },
+          command: 'connect' as const,
+          destination: {
+            host: ip,
+            port: port,
+          },
+          timeout: TOR_CONNECTION_TIMEOUT,
+        };
 
-          const info = await SocksClient.createConnection(socksOptions);
-          socket = info.socket;
-        } else {
-          // Direct connection for clearnet addresses
-          socket = new net.Socket();
-          socket.connect(port, ip);
-        }
-      } catch (error) {
-        // Connection failed (proxy not available or connection refused)
-        resolve();
-        return;
+        const info = await SocksClient.createConnection(socksOptions);
+        socket = info.socket;
+      } else {
+        // Direct connection for clearnet addresses
+        socket = new net.Socket();
+        socket.connect(port, ip);
       }
+    } catch (error) {
+      // Connection failed (proxy not available or connection refused)
+      return;
+    }
+    
+    return new Promise((resolve) => {
 
       let versionReceived = false;
       let services: bigint | null = null;

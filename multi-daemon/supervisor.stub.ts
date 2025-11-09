@@ -23,8 +23,10 @@ import {
 } from './tor-manager';
 
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9000', 10);
-const ENVFILES_DIR = '/envfiles/instances';
-const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR || '/app/.artifacts';
+// API writes to $ENVFILES_DIR/instances/, so we need to look in the instances subdirectory
+const ENVFILES_BASE = process.env.ENVFILES_DIR || '/envfiles';
+const ENVFILES_DIR = path.join(ENVFILES_BASE, 'instances');
+const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR || '/artifacts';
 const DATA_DIR = process.env.DATA_DIR || '/data/bitcoin';
 
 // ============================================================================
@@ -105,6 +107,7 @@ function loadInstancesFromEnvfiles() {
     
     const files = fs.readdirSync(ENVFILES_DIR);
     const envFiles = files.filter(f => f.endsWith('.env'));
+    const foundInstanceIds = new Set<string>();
     
     for (const file of envFiles) {
       const filePath = path.join(ENVFILES_DIR, file);
@@ -123,8 +126,11 @@ function loadInstancesFromEnvfiles() {
       });
       
       if (config.INSTANCE_ID) {
+        foundInstanceIds.add(config.INSTANCE_ID);
+        
         // Check if instance already exists
-        if (!instances.has(config.INSTANCE_ID)) {
+        const existing = instances.get(config.INSTANCE_ID);
+        if (!existing) {
           // Create new instance with stub data
           const instance: DaemonInstance = {
             id: config.INSTANCE_ID,
@@ -144,8 +150,24 @@ function loadInstancesFromEnvfiles() {
           };
           
           instances.set(config.INSTANCE_ID, instance);
-          console.log(`Loaded instance: ${config.INSTANCE_ID}`);
+          console.log(`Loaded new instance: ${config.INSTANCE_ID}`);
+        } else {
+          // Update config fields that might have changed
+          existing.impl = config.BITCOIN_IMPL === 'knots' ? 'knots' : 'garbageman';
+          existing.network = (config.NETWORK || 'mainnet') as any;
+          existing.rpcPort = parseInt(config.RPC_PORT || '0', 10);
+          existing.p2pPort = parseInt(config.P2P_PORT || '0', 10);
+          existing.ipv4Enabled = config.IPV4_ENABLED === 'true';
+          console.log(`Refreshed existing instance: ${config.INSTANCE_ID}`);
         }
+      }
+    }
+    
+    // Remove instances that no longer have envfiles
+    for (const [instanceId] of instances) {
+      if (!foundInstanceIds.has(instanceId)) {
+        console.log(`Removing instance (envfile deleted): ${instanceId}`);
+        instances.delete(instanceId);
       }
     }
     
@@ -773,6 +795,19 @@ const server = http.createServer(async (req, res) => {
         timestamp: new Date().toISOString(),
       })
     );
+    return;
+  }
+
+  // Route: reload instances from envfiles
+  if (url === '/reload' && method === 'POST') {
+    console.log('Manual reload requested');
+    loadInstancesFromEnvfiles();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      instanceCount: instances.size,
+      message: 'Instances reloaded from envfiles',
+    }));
     return;
   }
 

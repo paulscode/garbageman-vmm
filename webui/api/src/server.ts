@@ -65,10 +65,15 @@ const fastify = Fastify({
   logger: loggerConfig,
   // Increase body size limit for artifact uploads (multipart handles its own limits)
   bodyLimit: 20 * 1024 * 1024 * 1024, // 20GB to handle large blockchain exports
+  // Increase timeouts for long-running operations (artifact imports, blockchain extraction)
+  // Set to 2 hours to handle very large file uploads (blockchain exports can be 10GB+)
+  connectionTimeout: 7200000, // 2 hours
+  requestTimeout: 7200000, // 2 hours
+  keepAliveTimeout: 7200000, // 2 hours
 });
 
 // Log all incoming requests
-fastify.addHook('onRequest', async (request, reply) => {
+fastify.addHook('onRequest', async (request, _reply) => {
   fastify.log.info(`Incoming ${request.method} ${request.url} from ${request.ip}`);
 });
 

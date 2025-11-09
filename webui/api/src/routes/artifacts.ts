@@ -26,10 +26,7 @@ import { pipeline } from 'stream/promises';
 import { createWriteStream } from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
-import type {
-  ImportArtifactRequest,
-  ImportArtifactResponse,
-} from '../lib/types.js';
+
 import { logArtifactImported, logArtifactDeleted } from '../lib/events.js';
 
 const GITHUB_REPO = 'paulscode/garbageman-nm';
@@ -38,12 +35,13 @@ const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
 // Import progress tracking
 interface ImportProgress {
   tag: string;
-  status: 'downloading' | 'reassembling' | 'complete' | 'error';
+  status: 'downloading' | 'reassembling' | 'extracting' | 'processing' | 'complete' | 'error';
   progress: number; // 0-100
   currentFile?: string;
   totalFiles: number;
   downloadedFiles: number;
   error?: string;
+  message?: string;
   startedAt: number;
   completedAt?: number;
 }
@@ -83,6 +81,16 @@ interface LocalArtifact {
   path: string;
 }
 
+// In-memory tracking for chunk uploads
+const chunkUploads = new Map<string, {
+  tag: string;
+  filename: string;
+  totalChunks: number;
+  receivedChunks: Set<number>;
+  chunkDir: string;
+  startedAt: Date;
+}>();
+
 export default async function artifactsRoute(fastify: FastifyInstance) {
   
   // Register multipart for file uploads
@@ -90,6 +98,8 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
     limits: {
       fileSize: 20 * 1024 * 1024 * 1024, // 20GB max file size for blockchain exports
     },
+    // Don't attach to request (we'll use manual parsing for better control)
+    attachFieldsToBody: false,
   });
   
   // --------------------------------------------------------------------------
@@ -101,7 +111,7 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       const fs = await import('fs/promises');
       const path = await import('path');
       
-      const artifactsDir = '/app/.artifacts';
+      const artifactsDir = process.env.ARTIFACTS_DIR || '/root/artifacts';
       
       // Check if artifacts directory exists
       try {
@@ -280,7 +290,7 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
         }
         
         // Check if artifact already exists
-        const artifactPath = `/app/.artifacts/${tag}`;
+        const artifactPath = path.join(process.env.ARTIFACTS_DIR || '/root/artifacts', tag);
         const fs = await import('fs/promises');
         
         let existingMetadata: any = null;
@@ -320,7 +330,7 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
           // Directory doesn't exist, continue with import
         }
         
-        // Fetch release details from GitHub
+        // Fetch release details from GitHub to validate
         const releaseResponse = await fetch(`${GITHUB_API_URL}/tags/${tag}`, {
           headers: {
             'User-Agent': 'garbageman-webui',
@@ -335,191 +345,49 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
         
         const release: GitHubRelease = await releaseResponse.json() as GitHubRelease;
         
-        // Parse assets
-        const assets = release.assets;
-        const bitcoindGm = assets.find(a => a.name === 'bitcoind-gm');
-        const bitcoinCliGm = assets.find(a => a.name === 'bitcoin-cli-gm');
-        const bitcoindKnots = assets.find(a => a.name === 'bitcoind-knots');
-        const bitcoinCliKnots = assets.find(a => a.name === 'bitcoin-cli-knots');
-        const containerImage = assets.find(a => a.name === 'container-image.tar.gz');
-        const sha256sums = assets.find(a => a.name === 'SHA256SUMS');
-        const manifest = assets.find(a => a.name === 'MANIFEST.txt');
-        
-        // Create artifact directory (artifactPath and fs already declared above)
-        await fs.mkdir(artifactPath, { recursive: true });
-        
-        fastify.log.info(`Created artifact directory: ${artifactPath}`);
-        
-        // Download files we need
-        const downloads: Array<{ name: string; url: string }> = [];
-        
-        // If artifact exists and we're only adding blockchain, skip binaries
-        const onlyDownloadBlockchain = artifactExists && existingMetadata && !skipBlockchain;
-        
-        if (!onlyDownloadBlockchain) {
-          // Download checksums and manifest
-          if (sha256sums) downloads.push({ name: 'SHA256SUMS', url: sha256sums.browser_download_url });
-          if (manifest) downloads.push({ name: 'MANIFEST.txt', url: manifest.browser_download_url });
-          
-          // Download binaries
-          if (bitcoindGm) downloads.push({ name: 'bitcoind-gm', url: bitcoindGm.browser_download_url });
-          if (bitcoinCliGm) downloads.push({ name: 'bitcoin-cli-gm', url: bitcoinCliGm.browser_download_url });
-          if (bitcoindKnots) downloads.push({ name: 'bitcoind-knots', url: bitcoindKnots.browser_download_url });
-          if (bitcoinCliKnots) downloads.push({ name: 'bitcoin-cli-knots', url: bitcoinCliKnots.browser_download_url });
-          
-          // Download container image
-          if (containerImage) downloads.push({ name: 'container-image.tar.gz', url: containerImage.browser_download_url });
-        }
-        
-        // Download blockchain parts if requested
-        if (!skipBlockchain) {
-          const blockchainParts = assets.filter(a => a.name.startsWith('blockchain.tar.gz.part'));
-          for (const part of blockchainParts) {
-            downloads.push({ name: part.name, url: part.browser_download_url });
-          }
-          fastify.log.info(`Will download ${blockchainParts.length} blockchain parts`);
-        }
-        
         // Initialize progress tracking
         importProgressMap.set(tag, {
           tag,
           status: 'downloading',
           progress: 0,
-          totalFiles: downloads.length,
+          totalFiles: 0,
           downloadedFiles: 0,
           startedAt: Date.now(),
         });
         
-        // Download each file
-        for (let i = 0; i < downloads.length; i++) {
-          const download = downloads[i];
-          fastify.log.info(`Downloading ${download.name}...`);
-          
-          // Update progress at start of download
-          const progressStart = Math.round((i / downloads.length) * 90);
-          importProgressMap.set(tag, {
-            ...importProgressMap.get(tag)!,
-            currentFile: download.name,
-            downloadedFiles: i,
-            progress: progressStart,
-          });
-          fastify.log.info(`Progress update: ${progressStart}% (${i}/${downloads.length} files)`);
-          
-          const fileResponse = await fetch(download.url, {
-            signal: AbortSignal.timeout(300000), // 5 min timeout per file
-          });
-          
-          if (!fileResponse.ok) {
-            throw new Error(`Failed to download ${download.name}: ${fileResponse.status}`);
-          }
-          
-          const buffer = Buffer.from(await fileResponse.arrayBuffer());
-          const filePath = `${artifactPath}/${download.name}`;
-          await fs.writeFile(filePath, buffer);
-          
-          // Make binaries executable
-          if (download.name.startsWith('bitcoind') || download.name.startsWith('bitcoin-cli')) {
-            await fs.chmod(filePath, 0o755);
-          }
-          
-          fastify.log.info(`Downloaded ${download.name} (${buffer.length} bytes)`);
-          
-          // Update progress after download completes
-          const progressEnd = Math.round(((i + 1) / downloads.length) * 90);
-          importProgressMap.set(tag, {
-            ...importProgressMap.get(tag)!,
-            downloadedFiles: i + 1,
-            progress: progressEnd,
-          });
-          fastify.log.info(`Progress update: ${progressEnd}% (${i + 1}/${downloads.length} files)`);
-        }
-        
-        // Update progress after downloads
-        importProgressMap.set(tag, {
-          ...importProgressMap.get(tag)!,
-          downloadedFiles: downloads.length,
-          progress: 90,
-        });
-        
-        // Reassemble blockchain parts if they were downloaded
-        if (!skipBlockchain) {
-          const blockchainParts = downloads.filter(d => d.name.startsWith('blockchain.tar.gz.part'));
-          if (blockchainParts.length > 0) {
-            fastify.log.info(`Reassembling ${blockchainParts.length} blockchain parts...`);
-            
-            // Update progress
+        // Start the download process in the background (don't await)
+        performGitHubImport(fastify, tag, skipBlockchain, release, artifactPath, existingMetadata, artifactExists)
+          .catch(error => {
+            fastify.log.error({ error }, `Background import failed for ${tag}`);
             importProgressMap.set(tag, {
               ...importProgressMap.get(tag)!,
-              status: 'reassembling',
-              progress: 92,
+              status: 'error',
+              error: error instanceof Error ? error.message : 'Unknown error',
+              progress: 0,
             });
-            
-            // Sort parts by name to ensure correct order
-            blockchainParts.sort((a, b) => a.name.localeCompare(b.name));
-            
-            // Read and concatenate all parts
-            const blockchainPath = `${artifactPath}/blockchain.tar.gz`;
-            const writeStream = await fs.open(blockchainPath, 'w');
-            
-            for (const part of blockchainParts) {
-              const partPath = `${artifactPath}/${part.name}`;
-              const partData = await fs.readFile(partPath);
-              await writeStream.write(partData);
-              // Delete part file after concatenating
-              await fs.unlink(partPath);
-              fastify.log.info(`Reassembled ${part.name}`);
-            }
-            
-            await writeStream.close();
-            fastify.log.info(`Blockchain reassembly complete: ${blockchainPath}`);
-          }
-        }
+          });
         
-        // Create or update metadata file
-        const metadata = existingMetadata ? {
-          ...existingMetadata,
-          hasBlockchain: !skipBlockchain && downloads.some(d => d.name.startsWith('blockchain.tar.gz.part')),
-        } : {
-          tag,
-          importedAt: new Date().toISOString(),
-          hasGarbageman: !!(bitcoindGm && bitcoinCliGm),
-          hasKnots: !!(bitcoindKnots && bitcoinCliKnots),
-          hasContainer: !!containerImage,
-          hasBlockchain: !skipBlockchain && downloads.some(d => d.name.startsWith('blockchain.tar.gz.part')),
-          files: downloads.map(d => d.name).filter(name => !name.startsWith('blockchain.tar.gz.part')), // Exclude parts from file list
-        };
-        
-        await fs.writeFile(
-          `${artifactPath}/metadata.json`,
-          JSON.stringify(metadata, null, 2)
-        );
-        
-        fastify.log.info(`Artifact import complete: ${tag}`);
-        
-        // Log event
-        logArtifactImported(tag, !skipBlockchain);
-        
-        // Mark progress as complete
-        importProgressMap.set(tag, {
-          ...importProgressMap.get(tag)!,
-          status: 'complete',
-          progress: 100,
-          completedAt: Date.now(),
-        });
-        
-        // Clean up progress after 30 seconds
-        setTimeout(() => {
-          importProgressMap.delete(tag);
-        }, 30000);
-        
-        reply.code(201).send({
+        // Return immediately - client will poll progress
+        reply.code(202).send({
           success: true,
-          message: `Successfully imported artifact ${tag}`,
+          message: `Import started for ${tag}. Check progress at /api/artifacts/import/progress/${tag}`,
           artifactPath,
         });
         
       } catch (error) {
-        fastify.log.error({ error }, `Failed to import artifact ${tag}`);
+        fastify.log.error({ error }, `Failed to start import for ${tag}`);
+        
+        // Update progress map with error
+        importProgressMap.set(tag, {
+          tag,
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error',
+          progress: 0,
+          totalFiles: 0,
+          downloadedFiles: 0,
+          startedAt: Date.now(),
+        });
+        
         reply.code(500).send({
           success: false,
           message: error instanceof Error ? error.message : 'Unknown error',
@@ -527,6 +395,214 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       }
     }
   );
+  
+  // Helper function to perform the actual download (runs in background)
+  async function performGitHubImport(
+    fastify: FastifyInstance,
+    tag: string,
+    skipBlockchain: boolean,
+    release: GitHubRelease,
+    artifactPath: string,
+    existingMetadata: any,
+    artifactExists: boolean
+  ) {
+    try {
+      const fs = await import('fs/promises');
+      
+      // Parse assets
+      const assets = release.assets;
+      const bitcoindGm = assets.find(a => a.name === 'bitcoind-gm');
+      const bitcoinCliGm = assets.find(a => a.name === 'bitcoin-cli-gm');
+      const bitcoindKnots = assets.find(a => a.name === 'bitcoind-knots');
+      const bitcoinCliKnots = assets.find(a => a.name === 'bitcoin-cli-knots');
+      const containerImage = assets.find(a => a.name === 'container-image.tar.gz');
+      const sha256sums = assets.find(a => a.name === 'SHA256SUMS');
+      const manifest = assets.find(a => a.name === 'MANIFEST.txt');
+      
+      // Create artifact directory
+      await fs.mkdir(artifactPath, { recursive: true });
+      
+      fastify.log.info(`Created artifact directory: ${artifactPath}`);
+      
+      // Download files we need
+      const downloads: Array<{ name: string; url: string }> = [];
+      
+      // If artifact exists and we're only adding blockchain, skip binaries
+      const onlyDownloadBlockchain = artifactExists && existingMetadata && !skipBlockchain;
+      
+      if (!onlyDownloadBlockchain) {
+        // Download checksums and manifest
+        if (sha256sums) downloads.push({ name: 'SHA256SUMS', url: sha256sums.browser_download_url });
+        if (manifest) downloads.push({ name: 'MANIFEST.txt', url: manifest.browser_download_url });
+        
+        // Download binaries
+        if (bitcoindGm) downloads.push({ name: 'bitcoind-gm', url: bitcoindGm.browser_download_url });
+        if (bitcoinCliGm) downloads.push({ name: 'bitcoin-cli-gm', url: bitcoinCliGm.browser_download_url });
+        if (bitcoindKnots) downloads.push({ name: 'bitcoind-knots', url: bitcoindKnots.browser_download_url });
+        if (bitcoinCliKnots) downloads.push({ name: 'bitcoin-cli-knots', url: bitcoinCliKnots.browser_download_url });
+        
+        // Download container image
+        if (containerImage) downloads.push({ name: 'container-image.tar.gz', url: containerImage.browser_download_url });
+      }
+      
+      // Download blockchain parts if requested
+      if (!skipBlockchain) {
+        const blockchainParts = assets.filter(a => a.name.startsWith('blockchain.tar.gz.part'));
+        if (blockchainParts.length === 0) {
+          fastify.log.warn(`No blockchain data available in release ${tag}`);
+          // Update progress with warning
+          importProgressMap.set(tag, {
+            ...importProgressMap.get(tag)!,
+            status: 'error',
+            error: 'No blockchain data available in this release',
+            progress: 0,
+          });
+          throw new Error('No blockchain data available in this release');
+        }
+        for (const part of blockchainParts) {
+          downloads.push({ name: part.name, url: part.browser_download_url });
+        }
+        fastify.log.info(`Will download ${blockchainParts.length} blockchain parts`);
+      }
+      
+      // Update progress with totalFiles
+      importProgressMap.set(tag, {
+        ...importProgressMap.get(tag)!,
+        totalFiles: downloads.length,
+      });
+      
+      // Download each file
+      for (let i = 0; i < downloads.length; i++) {
+        const download = downloads[i];
+        fastify.log.info(`Downloading ${download.name}...`);
+        
+        // Update progress at start of download
+        const progressStart = Math.round((i / downloads.length) * 90);
+        importProgressMap.set(tag, {
+          ...importProgressMap.get(tag)!,
+          currentFile: download.name,
+          downloadedFiles: i,
+          progress: progressStart,
+        });
+        fastify.log.info(`Progress update: ${progressStart}% (${i}/${downloads.length} files)`);
+        
+        const fileResponse = await fetch(download.url, {
+          signal: AbortSignal.timeout(300000), // 5 min timeout per file
+        });
+        
+        if (!fileResponse.ok) {
+          throw new Error(`Failed to download ${download.name}: ${fileResponse.status}`);
+        }
+        
+        const buffer = Buffer.from(await fileResponse.arrayBuffer());
+        const filePath = `${artifactPath}/${download.name}`;
+        await fs.writeFile(filePath, buffer);
+        
+        // Make binaries executable
+        if (download.name.startsWith('bitcoind') || download.name.startsWith('bitcoin-cli')) {
+          await fs.chmod(filePath, 0o755);
+        }
+        
+        fastify.log.info(`Downloaded ${download.name} (${buffer.length} bytes)`);
+        
+        // Update progress after download completes
+        const progressEnd = Math.round(((i + 1) / downloads.length) * 90);
+        importProgressMap.set(tag, {
+          ...importProgressMap.get(tag)!,
+          downloadedFiles: i + 1,
+          progress: progressEnd,
+        });
+        fastify.log.info(`Progress update: ${progressEnd}% (${i + 1}/${downloads.length} files)`);
+      }
+      
+      // Update progress after downloads
+      importProgressMap.set(tag, {
+        ...importProgressMap.get(tag)!,
+        downloadedFiles: downloads.length,
+        progress: 90,
+      });
+      
+      // Reassemble blockchain parts if they were downloaded
+      if (!skipBlockchain) {
+        const blockchainParts = downloads.filter(d => d.name.startsWith('blockchain.tar.gz.part'));
+        if (blockchainParts.length > 0) {
+          fastify.log.info(`Reassembling ${blockchainParts.length} blockchain parts...`);
+          
+          // Update progress
+          importProgressMap.set(tag, {
+            ...importProgressMap.get(tag)!,
+            status: 'reassembling',
+            progress: 92,
+          });
+          
+          // Sort parts by name to ensure correct order
+          blockchainParts.sort((a, b) => a.name.localeCompare(b.name));
+          
+          // Read and concatenate all parts
+          const blockchainPath = `${artifactPath}/blockchain.tar.gz`;
+          const writeStream = await fs.open(blockchainPath, 'w');
+          
+          for (const part of blockchainParts) {
+            const partPath = `${artifactPath}/${part.name}`;
+            const partData = await fs.readFile(partPath);
+            await writeStream.write(partData);
+            // Delete part file after concatenating
+            await fs.unlink(partPath);
+            fastify.log.info(`Reassembled ${part.name}`);
+          }
+          
+          await writeStream.close();
+          fastify.log.info(`Blockchain reassembly complete: ${blockchainPath}`);
+        }
+      }
+      
+      // Create or update metadata file
+      const metadata = existingMetadata ? {
+        ...existingMetadata,
+        hasBlockchain: !skipBlockchain && downloads.some(d => d.name.startsWith('blockchain.tar.gz.part')),
+      } : {
+        tag,
+        importedAt: new Date().toISOString(),
+        hasGarbageman: !!(bitcoindGm && bitcoinCliGm),
+        hasKnots: !!(bitcoindKnots && bitcoinCliKnots),
+        hasContainer: !!containerImage,
+        hasBlockchain: !skipBlockchain && downloads.some(d => d.name.startsWith('blockchain.tar.gz.part')),
+        files: downloads.map(d => d.name).filter(name => !name.startsWith('blockchain.tar.gz.part')), // Exclude parts from file list
+      };
+      
+      await fs.writeFile(
+        `${artifactPath}/metadata.json`,
+        JSON.stringify(metadata, null, 2)
+      );
+      
+      fastify.log.info(`Artifact import complete: ${tag}`);
+      
+      // Log event
+      logArtifactImported(tag, !skipBlockchain);
+      
+      // Mark progress as complete
+      importProgressMap.set(tag, {
+        ...importProgressMap.get(tag)!,
+        status: 'complete',
+        progress: 100,
+        completedAt: Date.now(),
+      });
+      
+      // Clean up progress after 30 seconds
+      setTimeout(() => {
+        importProgressMap.delete(tag);
+      }, 30000);
+      
+    } catch (error) {
+      fastify.log.error({ error }, `Background import failed for ${tag}`);
+      importProgressMap.set(tag, {
+        ...importProgressMap.get(tag)!,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      throw error;
+    }
+  }
   
   // --------------------------------------------------------------------------
   // DELETE /api/artifacts/:tag - Delete an artifact
@@ -546,7 +622,7 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       const { tag } = request.params;
       
       try {
-        const artifactPath = `/app/.artifacts/${tag}`;
+        const artifactPath = path.join(process.env.ARTIFACTS_DIR || '/root/artifacts', tag);
         const fs = await import('fs/promises');
         
         // Check if artifact exists
@@ -583,7 +659,148 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
   );
   
   // --------------------------------------------------------------------------
-  // POST /api/artifacts/import - Import daemon artifacts from file upload
+  // POST /api/artifacts/import/chunk - Upload a single chunk
+  // --------------------------------------------------------------------------
+  
+  fastify.post('/api/artifacts/import/chunk', async (request, reply) => {
+    try {
+      const data = await request.file();
+      
+      if (!data) {
+        return reply.code(400).send({ success: false, message: 'No file chunk provided' });
+      }
+      
+      // Extract metadata from fields
+      const uploadId = (data.fields.uploadId as any)?.value || (data.fields.uploadId as any);
+      const tag = (data.fields.tag as any)?.value || (data.fields.tag as any);
+      const filename = (data.fields.filename as any)?.value || (data.fields.filename as any);
+      const chunkIndex = parseInt((data.fields.chunkIndex as any)?.value || (data.fields.chunkIndex as any));
+      const totalChunks = parseInt((data.fields.totalChunks as any)?.value || (data.fields.totalChunks as any));
+      
+      if (!uploadId || !tag || !filename || isNaN(chunkIndex) || isNaN(totalChunks)) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Missing required fields: uploadId, tag, filename, chunkIndex, totalChunks',
+        });
+      }
+      
+      fastify.log.info(`Received chunk ${chunkIndex + 1}/${totalChunks} for upload ${uploadId}`);
+      
+      // Initialize upload tracking if first chunk
+      if (!chunkUploads.has(uploadId)) {
+        const chunkDir = path.join('/tmp', `chunk-upload-${uploadId}`);
+        await fs.mkdir(chunkDir, { recursive: true });
+        
+        chunkUploads.set(uploadId, {
+          tag,
+          filename,
+          totalChunks,
+          receivedChunks: new Set(),
+          chunkDir,
+          startedAt: new Date(),
+        });
+      }
+      
+      const uploadInfo = chunkUploads.get(uploadId)!;
+      
+      // Save chunk to disk
+      const chunkPath = path.join(uploadInfo.chunkDir, `chunk-${chunkIndex}`);
+      await pipeline(data.file, createWriteStream(chunkPath));
+      
+      uploadInfo.receivedChunks.add(chunkIndex);
+      
+      fastify.log.info(`Saved chunk ${chunkIndex} to ${chunkPath}. Progress: ${uploadInfo.receivedChunks.size}/${totalChunks}`);
+      
+      // Check if all chunks received
+      if (uploadInfo.receivedChunks.size === totalChunks) {
+        fastify.log.info(`All chunks received for upload ${uploadId}. Starting assembly...`);
+        
+        // Initialize progress map immediately so polling works
+        importProgressMap.set(tag, {
+          tag,
+          status: 'processing',
+          message: 'Assembling uploaded file...',
+          progress: 0,
+          totalFiles: 0,
+          downloadedFiles: 0,
+          startedAt: Date.now(),
+        });
+        
+        // Assemble chunks in background
+        (async () => {
+          try {
+            const finalPath = path.join('/tmp', `artifact-upload-${Date.now()}`, filename);
+            await fs.mkdir(path.dirname(finalPath), { recursive: true });
+            
+            // Concatenate chunks in order
+            const writeStream = createWriteStream(finalPath);
+            for (let i = 0; i < totalChunks; i++) {
+              const chunkPath = path.join(uploadInfo.chunkDir, `chunk-${i}`);
+              const chunkData = await fs.readFile(chunkPath);
+              writeStream.write(chunkData);
+            }
+            writeStream.end();
+            
+            await new Promise<void>((resolve, reject) => {
+              writeStream.on('finish', () => resolve());
+              writeStream.on('error', reject);
+            });
+            
+            fastify.log.info(`Assembled complete file at ${finalPath}`);
+            
+            // Clean up chunks
+            await fs.rm(uploadInfo.chunkDir, { recursive: true, force: true });
+            chunkUploads.delete(uploadId);
+            
+            // Start import processing
+            await processArtifactImport(tag, finalPath, path.dirname(finalPath), filename);
+          } catch (error) {
+            fastify.log.error({ err: error }, `Failed to assemble chunks for ${uploadId}`);
+            // Clean up on error
+            await fs.rm(uploadInfo.chunkDir, { recursive: true, force: true }).catch(() => {});
+            chunkUploads.delete(uploadId);
+            
+            // Update progress map with error
+            importProgressMap.set(tag, {
+              tag,
+              status: 'error',
+              message: 'Failed to assemble uploaded file',
+              error: (error as Error).message,
+              progress: 0,
+              totalFiles: 0,
+              downloadedFiles: 0,
+              startedAt: Date.now(),
+            });
+          }
+        })();
+        
+        return reply.code(202).send({
+          success: true,
+          message: 'All chunks received. Assembling file and processing...',
+          tag,
+          uploadId,
+        });
+      }
+      
+      // More chunks expected
+      return reply.code(200).send({
+        success: true,
+        message: `Chunk ${chunkIndex + 1}/${totalChunks} received`,
+        progress: uploadInfo.receivedChunks.size / totalChunks,
+        receivedChunks: uploadInfo.receivedChunks.size,
+        totalChunks,
+      });
+    } catch (error) {
+      fastify.log.error({ err: error }, 'Chunk upload error');
+      return reply.code(500).send({
+        success: false,
+        message: (error as Error).message || 'Failed to process chunk',
+      });
+    }
+  });
+  
+  // --------------------------------------------------------------------------
+  // POST /api/artifacts/import - Import daemon artifacts from file upload (legacy single-file upload)
   // --------------------------------------------------------------------------
   
   fastify.post('/api/artifacts/import', async (request, reply) => {
@@ -653,126 +870,22 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
         
         // Check saved file size
         const fileStats = await fs.stat(tempFilePath);
-        fastify.log.info(`File saved to ${tempFilePath}, size: ${fileStats.size} bytes (${(fileStats.size / 1024 / 1024).toFixed(2)} MB), starting extraction...`);
+        fastify.log.info(`File saved to ${tempFilePath}, size: ${fileStats.size} bytes (${(fileStats.size / 1024 / 1024).toFixed(2)} MB)`);
         
-        // Extract to temp directory first
-        const extractDir = path.join(tempDir, 'extracted');
-        await fs.mkdir(extractDir, { recursive: true });
+        // Start background processing
+        processArtifactImport(tag, tempFilePath, tempDir, filename).catch((err) => {
+          fastify.log.error({ err }, `Background import failed for ${tag}`);
+        });
         
-        // Extract based on file type
-        let extractSuccess = false;
-        
-        if (filename.endsWith('.tar.gz')) {
-          extractSuccess = await extractTar(tempFilePath, extractDir, 'gz');
-        } else if (filename.endsWith('.tar.xz')) {
-          extractSuccess = await extractTar(tempFilePath, extractDir, 'xz');
-        } else if (filename.endsWith('.zip')) {
-          extractSuccess = await extractZip(tempFilePath, extractDir);
-        }
-        
-        fastify.log.info(`Extraction completed: ${extractSuccess ? 'success' : 'failed'}`);
-        
-        if (!extractSuccess) {
-          await fs.rm(tempDir, { recursive: true, force: true });
-          return reply.code(500).send({
-            success: false,
-            message: 'Failed to extract archive',
-          });
-        }
-        
-        // Check if files are in root or in a single subfolder
-        const extractedFiles = await fs.readdir(extractDir);
-        let workingDir = extractDir;
-        
-        // If there's only one entry and it's a directory, use that as the working directory
-        if (extractedFiles.length === 1) {
-          const singleEntry = extractedFiles[0];
-          const singleEntryPath = path.join(extractDir, singleEntry);
-          const stat = await fs.stat(singleEntryPath);
-          
-          if (stat.isDirectory()) {
-            workingDir = singleEntryPath;
-            fastify.log.info(`Files are in subfolder: ${singleEntry}`);
-          }
-        }
-        
-        // List all files in working directory
-        const files = await fs.readdir(workingDir);
-        fastify.log.info(`Files found: ${files.join(', ')}`);
-        
-        // Detect which implementations are present (using correct binary names)
-        const hasGarbagemanBinaries = files.includes('bitcoind-gm') || files.includes('bitcoin-cli-gm');
-        const hasKnotsBinaries = files.includes('bitcoind-knots') || files.includes('bitcoin-cli-knots');
-        const hasBlockchainData = files.includes('blockchain.tar.gz') || files.some(f => f.startsWith('blockchain.tar.gz.part'));
-        const hasContainerImage = files.includes('container-image.tar.gz');
-        
-        if (!hasGarbagemanBinaries && !hasKnotsBinaries) {
-          await fs.rm(tempDir, { recursive: true, force: true });
-          return reply.code(400).send({
-            success: false,
-            message: 'Archive must contain bitcoind-gm/bitcoin-cli-gm or bitcoind-knots/bitcoin-cli-knots binaries',
-          });
-        }
-        
-        // Create destination directory
-        const destDir = path.join('/app/.artifacts', tag);
-        await fs.mkdir(destDir, { recursive: true });
-        
-        // Copy files from working directory to destination
-        for (const file of files) {
-          const srcPath = path.join(workingDir, file);
-          const destPath = path.join(destDir, file);
-          await fs.copyFile(srcPath, destPath);
-          
-          // Make binaries executable
-          if (file.startsWith('bitcoind') || file.startsWith('bitcoin-cli')) {
-            await fs.chmod(destPath, 0o755);
-          }
-        }
-        
-        // Generate metadata matching GitHub import format
-        const metadata = {
-          tag,
-          importedAt: new Date().toISOString(),
-          hasGarbageman: hasGarbagemanBinaries,
-          hasKnots: hasKnotsBinaries,
-          hasContainer: hasContainerImage,
-          hasBlockchain: hasBlockchainData,
-          importMethod: 'upload',
-          filename,
-          files: files,
-        };
-        
-        await fs.writeFile(
-          path.join(destDir, 'metadata.json'),
-          JSON.stringify(metadata, null, 2)
-        );
-        
-        // Clean up temp files
-        await fs.rm(tempDir, { recursive: true, force: true });
-        
-        fastify.log.info(`Artifact imported successfully: ${tag}`);
-        logArtifactImported(tag, hasBlockchainData);
-        
-        reply.code(200).send({
+        // Return 202 immediately - processing continues in background
+        return reply.code(202).send({
           success: true,
-          message: `Artifact ${tag} imported successfully`,
-          artifact: {
-            tag,
-            hasGarbageman: hasGarbagemanBinaries,
-            hasKnots: hasKnotsBinaries,
-            hasContainer: hasContainerImage,
-            hasBlockchain: hasBlockchainData,
-            path: destDir,
-          },
+          message: `Artifact upload received. Processing in background...`,
+          tag,
         });
       } catch (error) {
-        // Clean up on error
+        // Clean up on upload error
         await fs.rm(tempDir, { recursive: true, force: true });
-        await fs.rm(path.join('/app/.artifacts', tag), {
-          recursive: true,
-          force: true,
-        }).catch(() => {}); // Ignore if doesn't exist
         throw error;
       }
     } catch (error) {
@@ -783,6 +896,195 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       });
     }
   });
+  
+  // Helper: Process artifact import in background
+  async function processArtifactImport(
+    tag: string,
+    tempFilePath: string,
+    tempDir: string,
+    filename: string
+  ): Promise<void> {
+    try {
+      // Initialize progress
+      importProgressMap.set(tag, {
+        tag,
+        status: 'extracting',
+        progress: 10,
+        message: 'Extracting archive...',
+        totalFiles: 0,
+        downloadedFiles: 0,
+        startedAt: Date.now(),
+      });
+      
+      // Extract to temp directory first
+      const extractDir = path.join(tempDir, 'extracted');
+      await fs.mkdir(extractDir, { recursive: true });
+      
+      // Extract based on file type
+      let extractSuccess = false;
+      
+      if (filename.endsWith('.tar.gz')) {
+        extractSuccess = await extractTar(tempFilePath, extractDir, 'gz');
+      } else if (filename.endsWith('.tar.xz')) {
+        extractSuccess = await extractTar(tempFilePath, extractDir, 'xz');
+      } else if (filename.endsWith('.zip')) {
+        extractSuccess = await extractZip(tempFilePath, extractDir);
+      }
+      
+      fastify.log.info(`Extraction completed: ${extractSuccess ? 'success' : 'failed'}`);
+      
+      if (!extractSuccess) {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        importProgressMap.set(tag, {
+          tag,
+          status: 'error',
+          progress: 0,
+          error: 'Failed to extract archive',
+          message: 'Extraction failed',
+          totalFiles: 0,
+          downloadedFiles: 0,
+          startedAt: Date.now(),
+        });
+        return;
+      }
+      
+      // Update progress
+      importProgressMap.set(tag, {
+        tag,
+        status: 'processing',
+        progress: 50,
+        message: 'Processing extracted files...',
+        totalFiles: 0,
+        downloadedFiles: 0,
+        startedAt: Date.now(),
+      });
+      
+      // Check if files are in root or in a single subfolder
+      const extractedFiles = await fs.readdir(extractDir);
+      let workingDir = extractDir;
+      
+      // If there's only one entry and it's a directory, use that as the working directory
+      if (extractedFiles.length === 1) {
+        const singleEntry = extractedFiles[0];
+        const singleEntryPath = path.join(extractDir, singleEntry);
+        const stat = await fs.stat(singleEntryPath);
+        
+        if (stat.isDirectory()) {
+          workingDir = singleEntryPath;
+          fastify.log.info(`Files are in subfolder: ${singleEntry}`);
+        }
+      }
+      
+      // List all files in working directory
+      const files = await fs.readdir(workingDir);
+      fastify.log.info(`Files found: ${files.join(', ')}`);
+      
+      // Detect which implementations are present (using correct binary names)
+      const hasGarbagemanBinaries = files.includes('bitcoind-gm') || files.includes('bitcoin-cli-gm');
+      const hasKnotsBinaries = files.includes('bitcoind-knots') || files.includes('bitcoin-cli-knots');
+      const hasBlockchainData = files.includes('blockchain.tar.gz') || files.some(f => f.startsWith('blockchain.tar.gz.part'));
+      const hasContainerImage = files.includes('container-image.tar.gz');
+      
+      if (!hasGarbagemanBinaries && !hasKnotsBinaries) {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        importProgressMap.set(tag, {
+          tag,
+          status: 'error',
+          progress: 0,
+          error: 'Archive must contain bitcoind-gm/bitcoin-cli-gm or bitcoind-knots/bitcoin-cli-knots binaries',
+          message: 'Invalid archive contents',
+          totalFiles: 0,
+          downloadedFiles: 0,
+          startedAt: Date.now(),
+        });
+        return;
+      }
+      
+      // Update progress
+      importProgressMap.set(tag, {
+        tag,
+        status: 'processing',
+        progress: 75,
+        message: 'Copying files...',
+        totalFiles: 0,
+        downloadedFiles: 0,
+        startedAt: Date.now(),
+      });
+      
+      // Create destination directory
+      const destDir = path.join(process.env.ARTIFACTS_DIR || '/root/artifacts', tag);
+      await fs.mkdir(destDir, { recursive: true });
+      
+      // Copy files from working directory to destination
+      for (const file of files) {
+        const srcPath = path.join(workingDir, file);
+        const destPath = path.join(destDir, file);
+        await fs.copyFile(srcPath, destPath);
+        
+        // Make binaries executable
+          if (file.startsWith('bitcoind') || file.startsWith('bitcoin-cli')) {
+          await fs.chmod(destPath, 0o755);
+        }
+      }
+      
+      // Generate metadata matching GitHub import format
+      const metadata = {
+        tag,
+        importedAt: new Date().toISOString(),
+        hasGarbageman: hasGarbagemanBinaries,
+        hasKnots: hasKnotsBinaries,
+        hasContainer: hasContainerImage,
+        hasBlockchain: hasBlockchainData,
+        importMethod: 'upload',
+        filename,
+        files: files,
+      };
+      
+      await fs.writeFile(
+        path.join(destDir, 'metadata.json'),
+        JSON.stringify(metadata, null, 2)
+      );
+      
+      // Clean up temp files
+      await fs.rm(tempDir, { recursive: true, force: true });
+      
+      fastify.log.info(`Artifact imported successfully: ${tag}`);
+      logArtifactImported(tag, hasBlockchainData);
+      
+      // Mark as complete
+      importProgressMap.set(tag, {
+        tag,
+        status: 'complete',
+        progress: 100,
+        message: 'Import complete',
+        totalFiles: files.length,
+        downloadedFiles: files.length,
+        startedAt: Date.now(),
+        completedAt: Date.now(),
+      });
+    } catch (error) {
+      // Clean up on error
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(path.join(process.env.ARTIFACTS_DIR || '/root/artifacts', tag), {
+        recursive: true,
+        force: true,
+      }).catch(() => {}); // Ignore if doesn't exist
+      
+      // Mark as error
+      importProgressMap.set(tag, {
+        tag,
+        status: 'error',
+        progress: 0,
+        error: (error as Error).message,
+        message: 'Import failed',
+        totalFiles: 0,
+        downloadedFiles: 0,
+        startedAt: Date.now(),
+      });
+      
+      fastify.log.error({ err: error }, `Artifact import failed for ${tag}`);
+    }
+  }
   
   // Helper function to extract tar archives
   async function extractTar(

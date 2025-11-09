@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { API_BASE_URL } from '@/lib/api-config';
+import { useEffect, useState, useCallback } from 'react';
 
 interface LocalArtifact {
   tag: string;
@@ -18,15 +19,15 @@ interface ArtifactsViewProps {
   authenticatedFetch: (url: string, options?: RequestInit) => Promise<Response>;
 }
 
-export function ArtifactsView({ onClose, onArtifactDeleted, authenticatedFetch }: ArtifactsViewProps) {
+export function ArtifactsView({ onClose: _onClose, onArtifactDeleted, authenticatedFetch }: ArtifactsViewProps) {
   const [artifacts, setArtifacts] = useState<LocalArtifact[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
 
-  const fetchArtifacts = async () => {
+  const fetchArtifacts = useCallback(async () => {
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
+      const apiBase = process.env.NEXT_PUBLIC_API_BASE || `${API_BASE_URL}`;
       const response = await authenticatedFetch(`${apiBase}/api/artifacts`);
       const data = await response.json();
       setArtifacts(data.artifacts || []);
@@ -35,16 +36,16 @@ export function ArtifactsView({ onClose, onArtifactDeleted, authenticatedFetch }
     } finally {
       setLoading(false);
     }
-  };
+  }, [authenticatedFetch]);
 
   useEffect(() => {
     fetchArtifacts();
-  }, []);
+  }, [fetchArtifacts]);
 
   const handleDelete = async (tag: string) => {
     setDeleting(tag);
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
+      const apiBase = process.env.NEXT_PUBLIC_API_BASE || `${API_BASE_URL}`;
       const response = await authenticatedFetch(`${apiBase}/api/artifacts/${encodeURIComponent(tag)}`, {
         method: 'DELETE',
       });
