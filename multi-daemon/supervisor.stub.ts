@@ -261,13 +261,19 @@ async function spawnBitcoind(instanceId: string, config: any): Promise<boolean> 
     }
     
     // Determine binary path based on implementation
-    const artifactTag = config.ARTIFACT || 'v2025-11-03-rc2'; // fallback
+    if (!config.ARTIFACT) {
+      console.error(`Cannot spawn ${instanceId}: ARTIFACT not specified in config. Please recreate the instance.`);
+      return false;
+    }
+    
+    const artifactTag = config.ARTIFACT;
     const binaryName = instance.impl === 'knots' ? 'bitcoind-knots' : 'bitcoind-gm';
     const binaryPath = path.join(ARTIFACTS_DIR, artifactTag, binaryName);
     
     // Check if binary exists
     if (!fs.existsSync(binaryPath)) {
       console.error(`Binary not found: ${binaryPath}`);
+      console.error(`Make sure artifact '${artifactTag}' is imported with binaries.`);
       return false;
     }
     

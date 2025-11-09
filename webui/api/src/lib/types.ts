@@ -28,6 +28,7 @@ export interface InstanceConfig {
   ZMQ_PORT: number;
   TOR_ONION?: string; // optional Tor onion address
   ADDNODE?: string; // Comma-separated list of peer addresses (ip:port)
+  ARTIFACT?: string; // Artifact tag (e.g., "v2025-11-03-rc2") for binary location
   // Optional overrides (inherit from GLOBAL if not set)
   BITCOIN_IMPL?: 'garbageman' | 'knots';
   BITCOIN_VERSION?: string; // e.g., "29.2.0"

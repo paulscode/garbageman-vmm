@@ -626,6 +626,7 @@ export default async function instancesRoute(fastify: FastifyInstance) {
           RPC_USER: rpcUser,
           RPC_PASS: rpcPass,
           ADDNODE: selectedPeers.length > 0 ? selectedPeers.join(',') : undefined,
+          ARTIFACT: body.artifact || undefined, // Store artifact tag for supervisor
         };
         
         // Extract blockchain data BEFORE writing config (supervisor will auto-start on config write)
